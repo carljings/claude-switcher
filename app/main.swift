@@ -13,7 +13,7 @@ struct CheckRow: Identifiable {
     var detail: String = ""
 }
 
-enum Phase { case checking, ready, failed, switching, done, fixing }
+enum Phase { case checking, ready, failed, openFailed, switching, done, fixing }
 
 enum AppTheme: String, CaseIterable {
     case black, white
@@ -65,6 +65,7 @@ final class VM: ObservableObject {
     ]
     @Published var phase: Phase = .checking
     @Published var current = "?"
+    @Published private(set) var selectedAccount = ""
     @Published var hasB = false
     @Published var banner = ""
     @Published var note = ""
@@ -79,6 +80,28 @@ final class VM: ObservableObject {
     let core: String
     init(core: String = NSHomeDirectory() + "/.local/bin/claude-switch.sh") { self.core = core }
     var canRescan: Bool { !isScanning && !isFingerprinting && !isOpeningProtected && phase != .switching && phase != .fixing }
+    var canConfirmOpen: Bool {
+        phase == .ready && canRescan && ["A", "B"].contains(selectedAccount)
+            && rows.allSatisfy { $0.state != .pending && $0.state != .fail }
+    }
+    var accountActionHint: String {
+        guard ["A", "B"].contains(selectedAccount) else { return "选择一个账号后，再确认打开。" }
+        if selectedAccount == current { return "确认后将复检环境，并打开当前账号 \(selectedAccount)。" }
+        return "确认后将退出 Claude，切换到账号 \(selectedAccount) 并打开。"
+            + (selectedAccount == "B" && !hasB ? "首次使用需在 Claude 中登录。" : "")
+    }
+
+    func selectAccount(_ target: String) {
+        guard phase == .ready && canRescan && ["A", "B"].contains(target) else { return }
+        selectedAccount = target
+    }
+
+    private func applyAccountStatus(_ output: String) {
+        let fields = output.split(whereSeparator: \.isWhitespace).map(String.init)
+        current = fields.contains("current=B") ? "B" : (fields.contains("current=A") ? "A" : "未初始化")
+        hasB = fields.contains("hasB=1")
+        if selectedAccount.isEmpty { selectedAccount = ["A", "B"].contains(current) ? current : "A" }
+    }
 
     func openProtectedBrowser() {
         guard canRescan else { return }
@@ -100,7 +123,7 @@ final class VM: ObservableObject {
         }
     }
 
-    func run(_ args: [String], timeout: TimeInterval = 45, done: @escaping (String) -> Void) {
+    func run(_ args: [String], timeout: TimeInterval = 45, requireSuccess: Bool = false, done: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let started = Date()
             let tmp = "/tmp/switcher-out-\(UUID().uuidString).txt"
@@ -135,12 +158,19 @@ final class VM: ObservableObject {
                 DispatchQueue.main.async { done("FAIL:操作超时，请重试") }
                 return
             }
+            if requireSuccess && p.terminationStatus != 0 {
+                let detail = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                let failure = detail.split(separator: "\n").map(String.init).first { $0.hasPrefix("FAIL:") }
+                let message = failure ?? "FAIL:操作未完成（退出码\(p.terminationStatus)），请重新扫描后重试。"
+                DispatchQueue.main.async { done(message) }
+                return
+            }
             DispatchQueue.main.async { done(out.trimmingCharacters(in: .whitespacesAndNewlines)) }
         }
     }
 
     func refresh() {
-        guard !isScanning && !isFingerprinting && !isOpeningProtected else { return }
+        guard canRescan else { return }
         isScanning = true
         phase = .checking
         banner = ""
@@ -175,8 +205,7 @@ final class VM: ObservableObject {
                 self.rows[idx].detail = detail
             }
             self.run(["status"]) { st in
-                self.current = st.contains("current=B") ? "B" : (st.contains("current=A") ? "A" : "未初始化")
-                self.hasB = st.contains("hasB=1")
+                self.applyAccountStatus(st)
                 self.run(["account-note"], timeout: 10) { observation in
                     self.accountNote = observation.isEmpty ? "账号权限未验证；网络检查不代表登录或模型可用。" : observation
                 }
@@ -203,26 +232,34 @@ final class VM: ObservableObject {
         run(["fix"], timeout: 180) { out in
             let steps = out.split(separator: "\n").map(String.init).filter { $0.hasPrefix("FIX:") }.map { String($0.dropFirst(4)) }
             self.banner = steps.last ?? ""
+            self.phase = .failed
             self.refresh()
         }
     }
 
-    func switchTo(_ target: String) {
-        guard canRescan else { return }
+    func confirmOpen() {
+        guard canConfirmOpen else { return }
+        let target = selectedAccount
         phase = .switching
-        banner = "正在切换到账号 \(target)…"
-        run(["switch", target], timeout: 180) { out in
-            if out.hasPrefix("FAIL:") {
-                self.phase = .failed
-                self.banner = String(out.dropFirst(5))
+        banner = "正在复检并打开账号 \(target)…"
+        run(["switch", target], timeout: 180, requireSuccess: true) { out in
+            let lines = out.split(separator: "\n").map(String.init)
+            let success = lines.last { $0.hasPrefix("OK:已切换到账号\(target) (") || $0 == "INFO:当前已是账号\(target)" }
+            let failure = lines.first { $0.hasPrefix("FAIL:") }
+            if failure != nil || success == nil {
+                self.banner = failure.map { String($0.dropFirst(5)) } ?? "未取得打开成功确认，请重新扫描后重试。"
+                self.run(["status"]) { status in
+                    self.applyAccountStatus(status)
+                    self.phase = .openFailed
+                }
                 return
             }
             var extra = ""
             if target == "B" && !self.hasB { extra = "B 号首次使用：请在打开的 Claude 里登录 B 账号，登录一次即可。" }
-            if out.hasPrefix("INFO:") { extra = "" }
+            if success?.hasPrefix("INFO:") == true { extra = "" }
             self.current = target
             self.phase = .done
-            self.banner = out.hasPrefix("INFO:") ? "当前已是账号 \(target)" : "已切换到账号 \(target)"
+            self.banner = "已请求打开账号 \(target)"
             self.note = extra
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
                 if self.phase == .done { NSApplication.shared.terminate(nil) }
@@ -251,7 +288,7 @@ struct ContentView: View {
                 checksCard
                 if vm.phase == .ready || vm.phase == .switching || vm.phase == .done {
                     accountCard
-                } else if vm.phase == .failed || vm.phase == .fixing {
+                } else if vm.phase == .failed || vm.phase == .openFailed || vm.phase == .fixing {
                     retryCard
                 }
                 Spacer(minLength: 0)
@@ -276,7 +313,7 @@ struct ContentView: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Claude 账号切换器").font(.title3.bold()).foregroundColor(theme.text)
-                Text("环境检查 · 切换 · 启动").font(.caption).foregroundColor(theme.secondary)
+                Text("环境检查 · 选择账号 · 确认打开").font(.caption).foregroundColor(theme.secondary)
             }
             Spacer()
             Button {
@@ -308,7 +345,8 @@ struct ContentView: View {
                 if vm.rows.contains(where: { $0.state == .warn }) { return ("有提醒", theme.warning) }
                 return ("本地通过", theme.success)
             case .failed: return ("检查未过", theme.danger)
-            case .switching: return ("切换中", theme.accent)
+            case .openFailed: return ("打开未完成", theme.danger)
+            case .switching: return ("打开中", theme.accent)
             case .fixing: return ("修复中", theme.warning)
             case .done: return ("完成", theme.success)
             }
@@ -426,7 +464,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity).padding(.vertical, 10)
             } else {
                 HStack(spacing: 6) {
-                    Text("当前账号").font(.caption).foregroundColor(theme.secondary)
+                    Text("当前档案").font(.caption).foregroundColor(theme.secondary)
                     Text(vm.current).font(.caption.bold())
                         .padding(.horizontal, 8).padding(.vertical, 3)
                         .background(theme.selected).foregroundColor(theme.accent)
@@ -445,8 +483,10 @@ struct ContentView: View {
                     Text(vm.accountNote).font(.caption2)
                         .foregroundColor(vm.accountNote.contains("on hold") ? theme.warning : theme.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .buttonStyle(.plain)
+                .help(vm.accountNote)
                 .popover(isPresented: $showAccountNote) {
                     CheckDetailView(row: CheckRow(name: "账号状态备注", icon: "person.crop.circle", state: .info, detail: vm.accountNote)).environment(\.appTheme, theme)
                 }
@@ -455,9 +495,23 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 HStack(spacing: 10) {
-                    accountButton("A", subtitle: vm.current == "A" ? "当前" : "已建档")
-                    accountButton("B", subtitle: vm.current == "B" ? "当前" : (vm.hasB ? "已建档" : "未初始化"))
+                    accountButton("A", subtitle: vm.current == "A" ? "当前使用" : "已建档")
+                    accountButton("B", subtitle: vm.current == "B" ? "当前使用" : (vm.hasB ? "已建档" : "首次使用 · 需登录"))
                 }
+                Text(vm.accountActionHint).font(.caption).foregroundColor(theme.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button { vm.confirmOpen() } label: {
+                    Label(vm.selectedAccount.isEmpty ? "请先选择账号" : "确认打开账号 \(vm.selectedAccount)", systemImage: "arrow.up.right.square")
+                        .font(.callout.bold()).frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .foregroundColor(vm.canConfirmOpen ? theme.background : theme.secondary)
+                        .background(vm.canConfirmOpen ? theme.accent : theme.button)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain).disabled(!vm.canConfirmOpen)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("复检通过后切换并请求打开所选账号（⌘↩）")
             }
         }
         .padding(12)
@@ -467,18 +521,25 @@ struct ContentView: View {
     }
 
     func accountButton(_ t: String, subtitle: String) -> some View {
-        Button { vm.switchTo(t) } label: {
+        Button { vm.selectAccount(t) } label: {
             VStack(spacing: 4) {
-                Text("账号 \(t)").font(.headline).foregroundColor(theme.text)
+                HStack(spacing: 6) {
+                    Image(systemName: vm.selectedAccount == t ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(vm.selectedAccount == t ? theme.accent : theme.secondary)
+                    Text("账号 \(t)").font(.headline).foregroundColor(theme.text)
+                }
                 Text(subtitle).font(.caption2).foregroundColor(theme.secondary)
             }
             .frame(maxWidth: .infinity).padding(.vertical, 14)
-            .background(vm.current == t ? theme.selected : theme.button)
+            .background(vm.selectedAccount == t ? theme.selected : theme.button)
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(vm.current == t ? theme.accent : theme.border, lineWidth: 1.2))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(vm.selectedAccount == t ? theme.accent : theme.border, lineWidth: 1.2))
         }
         .buttonStyle(.plain)
         .disabled(!vm.canRescan)
+        .accessibilityLabel("选择账号 \(t)")
+        .accessibilityValue((vm.selectedAccount == t ? "已选择，" : "未选择，") + subtitle)
+        .accessibilityHint("只选择账号；点击下方确认打开才会切换或启动")
     }
 
     var retryCard: some View {
@@ -492,8 +553,13 @@ struct ContentView: View {
                 if !vm.banner.isEmpty {
                     Text(vm.banner).font(.callout).foregroundColor(theme.danger).multilineTextAlignment(.center)
                 }
-                Text("存在未通过项，可网络修复或手动处理后重新扫描").font(.caption).foregroundColor(theme.secondary)
+                if !vm.selectedAccount.isEmpty {
+                    Text("待打开账号：\(vm.selectedAccount)（选择已保留）").font(.caption).foregroundColor(theme.text)
+                }
+                Text(vm.phase == .openFailed ? "重新扫描后再确认打开；若仍失败，请检查 Claude 安装。" : "存在未通过项，可网络修复或手动处理后重新扫描")
+                    .font(.caption).foregroundColor(theme.secondary)
                 HStack(spacing: 10) {
+                    if vm.phase != .openFailed {
                     Button { vm.fixAll() } label: {
                         Label("网络修复", systemImage: "wand.and.stars")
                             .font(.callout.bold())
@@ -504,12 +570,13 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!vm.canRescan)
+                    }
                     Button { vm.refresh() } label: {
                         Label("重新扫描", systemImage: "arrow.clockwise")
                             .font(.callout.bold())
                             .padding(.horizontal, 18).padding(.vertical, 8)
-                            .background(theme.button)
-                            .foregroundColor(theme.text)
+                            .background(vm.phase == .openFailed ? theme.accent : theme.button)
+                            .foregroundColor(vm.phase == .openFailed ? theme.background : theme.text)
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)

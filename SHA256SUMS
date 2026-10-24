@@ -1,4 +1,4 @@
-de2f6dd7ae4f125fd5cb6b78a52600e61722e280a91896195adf23971dd62713  core/claude-switch.sh
+c294f5b65e335af0d0f17c4c028eb1d3c0fe3b4f08f365a3dc372263c3ba1d64  core/claude-switch.sh
 403e54fb935580a60654ee32c5b411af43f523aaa9b2ce00e7f64d13bd233fb1  core/network-audit.py
 2c891f5f3cf392a6bb736dacc65a945afe89ae8e4d88e353b04fd1f9cd792ab1  core/stun-probe.py
 31f7e61fb5c8d988b7ab760ab5256b2bd899c8ad4492f34516629c8e3633f233  core/protected-access.py

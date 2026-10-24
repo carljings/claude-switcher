@@ -1040,6 +1040,8 @@ copy_tree() {
 
 switch_to() {
     target="$1"
+    case "$target" in A|B) ;; *) echo "FAIL:账号必须为A或B"; return 2 ;; esac
+    check || return 1
     cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
     just_archived=0
 
@@ -1058,7 +1060,7 @@ switch_to() {
         if [ "$just_archived" = "1" ] && [ ! -d "$DATA" ] && [ -d "$BASE/accounts/$target" ]; then
             copy_tree "$BASE/accounts/$target" "$DATA"
         fi
-        open -a "Claude"
+        open -a "Claude" || { echo "FAIL:未能打开Claude，请检查应用安装后重新扫描重试"; return 1; }
         echo "INFO:当前已是账号$target"
         return 0
     fi
@@ -1079,7 +1081,7 @@ switch_to() {
     rm -rf "$DATA" && mv "$DATA.new" "$DATA"
     echo "$target" > "$BASE/current"
 
-    open -a "Claude"
+    open -a "Claude" || { echo "FAIL:已切换到账号${target}，但未能打开Claude；请重新扫描后打开当前档案"; return 1; }
     log "已切换到账号$target 并启动 ($(( $(date +%s) - t0 ))s)"
     echo "OK:已切换到账号$target ($(( $(date +%s) - t0 ))s)"
     return 0

@@ -388,6 +388,55 @@ esac
         self.assertFalse(marker.exists())
         self.assertEqual(SCRIPT.read_bytes(), before)
 
+    def run_account_open(self, target, **values):
+        return subprocess.run(['/bin/bash', str(SCRIPT), 'switch', target],
+                              env=dict(self.env, **values), capture_output=True, text=True, timeout=12)
+
+    def test_account_open_rechecks_before_touching_the_current_archive(self):
+        (self.base / 'current').write_text('A')
+        data = self.home / 'Library/Application Support/Claude'
+        data.mkdir()
+        (data / 'fixture').write_text('account-A-fixture')
+        result = self.run_account_open('B', FAKE_TZ='Asia/Shanghai')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('FAIL:', result.stdout)
+        self.assertEqual((self.base / 'current').read_text(), 'A')
+        self.assertEqual((data / 'fixture').read_text(), 'account-A-fixture')
+        self.assertFalse((self.folder / 'unexpected-action').exists())
+
+    def test_current_account_open_failure_is_not_reported_as_success(self):
+        (self.base / 'current').write_text('A')
+        self.fake('open', 'exit 17\n')
+        result = self.run_account_open('A')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('FAIL:未能打开Claude', result.stdout)
+        self.assertNotIn('INFO:当前已是账号', result.stdout)
+        self.assertEqual((self.base / 'current').read_text(), 'A')
+
+    def test_new_archive_open_failure_keeps_the_actual_profile_and_previous_archive(self):
+        (self.base / 'current').write_text('A')
+        data = self.home / 'Library/Application Support/Claude'
+        data.mkdir()
+        (data / 'fixture').write_text('account-A-fixture')
+        self.fake('pgrep', 'case "$*" in *verge-mihomo*) exit 0;; *) exit 1;; esac\n')
+        self.fake('open', 'exit 17\n')
+        result = self.run_account_open('B')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('FAIL:已切换到账号B，但未能打开Claude', result.stdout)
+        self.assertEqual((self.base / 'current').read_text().strip(), 'B')
+        self.assertEqual((self.base / 'accounts/A/fixture').read_text(), 'account-A-fixture')
+        self.assertTrue(data.is_dir())
+        self.assertFalse((self.folder / 'unexpected-action').exists())
+
+    def test_invalid_account_does_not_run_preflight_or_open(self):
+        marker = self.folder / 'invalid-account-network'
+        self.fake('curl', 'touch ' + shlex.quote(str(marker)) + '\nexit 99\n')
+        result = self.run_account_open('../invalid')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('FAIL:账号必须为A或B', result.stdout)
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.folder / 'unexpected-action').exists())
+
     def test_unknown_selected_node_never_falls_back_to_legacy_pin(self):
         self.selector_policy('Unconfigured-node')
         (self.base / 'expected-exit-ip').write_text('192.0.2.20')
