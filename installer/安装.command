@@ -111,7 +111,7 @@ echo "✓ 地区自适应: 国家=$CTRY 时区=$TZV 地区格式=$LOCALE (按当
 # ---- 3. 安装文件 ----
 mkdir -p "$H/.local/bin" "$H/.claude-switcher" "$H/Library/Logs"
 cp "$REPO/core/claude-switch.sh" "$H/.local/bin/"
-cp "$REPO/core/stun-probe.py" "$REPO/core/network-audit.py" "$REPO/core/protected-access.py" "$H/.claude-switcher/"
+cp "$REPO/core/stun-probe.py" "$REPO/core/network-audit.py" "$REPO/core/protected-access.py" "$REPO/core/clash-profile-guard.py" "$REPO/core/clash-profile-guard.js" "$H/.claude-switcher/"
 chmod +x "$H/.local/bin/claude-switch.sh"
 # 写入探测到的客户端/代理组名/地区目标
 sed -i '' \
@@ -192,7 +192,7 @@ echo "✓ App 已放到桌面"
 if [ "$MODE" = "clash-verge" ]; then
     # 复用核心脚本里的 write_merge_rules(隐藏入口),保证与 fix() 行为一致
     if "$H/.local/bin/claude-switch.sh" write-merge-rules; then
-        echo "✓ Claude 域名置顶规则已写入(智能合并,不动已有配置;重启 Clash Verge 后生效)"
+        echo "✓ Claude 域名订阅末尾防护脚本已核对(重启 Clash Verge 后重新生成并核验)"
     else
         echo "⚠️  置顶规则写入失败,可稍后运行 claude-switch.sh fix 重试"
     fi

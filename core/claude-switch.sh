@@ -421,6 +421,11 @@ assess_access() {
     case "$1/$2" in
         *429*) ACCESS_STATE="warn"; ACCESS_DETAIL="限流,请查看官方用量并稍后重试;$ACCESS_DETAIL" ;;
         5*|*/5*) ACCESS_STATE="warn"; ACCESS_DETAIL="服务端异常,请核对官方状态;$ACCESS_DETAIL" ;;
+        403/401)
+            ACCESS_STATE="warn"; ACCESS_DETAIL="访问受限或需要验证,请在官方应用确认;$ACCESS_DETAIL"
+            if [ "${5:-}" = "cf-challenge" ]; then
+                ACCESS_STATE="info"; ACCESS_DETAIL="网页Cloudflare浏览器验证(403),API匿名未认证(401);HTTP已有响应,账号权限未验证"
+            fi ;;
         401/*|403/*|*/403|*/407) ACCESS_STATE="warn"; ACCESS_DETAIL="访问受限或需要验证,请在官方应用确认;$ACCESS_DETAIL" ;;
         [23]*/401|[23]*/[23]*) ;;
         *) ACCESS_STATE="warn"; ACCESS_DETAIL="HTTP访问未确认;$ACCESS_DETAIL" ;;
@@ -493,13 +498,24 @@ network_evidence() {
 }
 
 access_probe() {
+    local challenge="" headers="" observed="" confirm_rc=1
     if [ -n "$PROBE_WEB" ] && [ -n "$PROBE_API" ]; then
         r1="$PROBE_WEB"; r2="$PROBE_API"; rc1="$PROBE_WEB_RC"; rc2="$PROBE_API_RC"
     else
         r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null); rc1=$?
         r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null); rc2=$?
     fi
-    assess_access "$r1" "$r2" "$rc1" "$rc2"
+    if [ "$r1/$r2/$rc1/$rc2" = "403/401/0/0" ]; then
+        headers=$(mktemp "$BASE/.http-headers.XXXXXX") || headers=""
+        if [ -n "$headers" ]; then
+            observed=$(curl -q -s --max-time 8 -D "$headers" -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null); confirm_rc=$?
+            if [ "$confirm_rc" = "0" ] && [ "$observed" = "403" ] && grep -Eiq '^cf-mitigated:[[:blank:]]*challenge[[:space:]]*$' "$headers"; then
+                challenge="cf-challenge"
+            fi
+            rm -f "$headers"
+        fi
+    fi
+    assess_access "$r1" "$r2" "$rc1" "$rc2" "$challenge"
 }
 
 # 注册不等于实时保护。状态由root所有的保镖模块落在系统安装目录。
@@ -635,7 +651,7 @@ checkdetail() {
     fi
     preference_rows
     v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
-    if echo "$v6" | grep -qi 'off'; then echo 'IPv6=ok:已关闭'; else echo 'IPv6=fail:未关闭'; fi
+    if echo "$v6" | grep -qi 'off'; then echo 'IPv6=ok:Wi-Fi已关闭;Clash内核另见探测路由'; else echo 'IPv6=fail:Wi-Fi未关闭'; fi
     dnsip=$(dig +short +time=3 +tries=1 claude.ai 2>/dev/null | head -1)
     case "$dnsip" in
         198.18.*) echo 'DNS=info:claude.ai返回Fake-IP;未单独验证全部上游DNS路径' ;;
@@ -674,106 +690,15 @@ checkdetail() {
     echo "生态可达性=$ACCESS_STATE:$ACCESS_DETAIL"
 }
 
-# 置顶规则写入(智能合并):不整文件覆盖,用户已有的 Merge 配置原样保留
-# 标记块自包含 prepend-rules 键+全部规则,重复执行幂等
+# 兼容命令名;使用订阅末尾脚本,不再把prepend-rules写进普通Merge字段。
 write_merge_rules() {
-    M="$CLASH_DIR/profiles/Merge.yaml"
-    B0="# >>> claude-switcher pinned rules >>>"
-    B1="# <<< claude-switcher pinned rules <<<"
-    mkdir -p "$CLASH_DIR/profiles"
-    # 置顶规则清单(缩进两格)
-    rules=""
-    # HTTP固定出口不承载UDP。先拒绝已知STUN端口与域名,TCP规则不变。
-    for p in 3478 5349 19302; do
-        rules="$rules  - AND,((NETWORK,udp),(DST-PORT,$p)),REJECT
-"
-    done
-    for h in stun.miwifi.com stun.chat.bilibili.com stun.l.google.com stun.cloudflare.com; do
-        rules="$rules  - AND,((NETWORK,udp),(DOMAIN,$h)),REJECT
-"
-    done
-    for d in claude.ai claude.com anthropic.com claudeusercontent.com challenges.cloudflare.com datadoghq.com segment.io stripe.com stripe.network stripecdn.com intercom.io intercomcdn.com intercomassets.com; do
-        rules="$rules  - DOMAIN-SUFFIX,$d,$PROXY_GROUP
-"
-    done
-
-    # 首次:文件不存在,整文件写入
-    if [ ! -f "$M" ]; then
-        cat > "$M" <<MEOF
-# Profile Enhancement Merge Template for Clash Verge
-
-profile:
-  store-selected: true
-
-# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)
-$B0
-prepend-rules:
-$rules$B1
-MEOF
-        return 0
+    local helper="$BASE/clash-profile-guard.py"
+    [ -f "$helper" ] || helper="$(dirname "$0")/clash-profile-guard.py"
+    if [ ! -f "$helper" ]; then
+        echo "FAIL:缺少订阅防护模块,请更新配套文件"
+        return 1
     fi
-
-    # 已存在:备份后幂等替换(只在将要修改时备份)
-    cp "$M" "$M.bak.$(date +%Y%m%d%H%M%S)"
-    tmp="$M.cs.tmp"
-    cp "$M" "$tmp"
-    # 删除旧标记块(含标记行,兼容块在 prepend-rules 下缩进的情形)
-    if grep -qF "$B0" "$tmp"; then
-        awk -v b0="$B0" -v b1="$B1" '
-            index($0, b0) {inblock=1; next}
-            inblock && index($0, b1) {inblock=0; next}
-            !inblock
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-        # 清理孤立的 prepend-rules: 键(其后没有规则行,只剩空行/注释/EOF)
-        awk '
-            { L[NR]=$0 }
-            END {
-                for (i=1; i<=NR; i++) {
-                    if (L[i] ~ /^prepend-rules:/) {
-                        has=0
-                        for (j=i+1; j<=NR; j++) {
-                            if (L[j] ~ /^[ \t]*- /) { has=1; break }
-                            if (L[j] ~ /^[ \t]*$/ || L[j] ~ /^[ \t]*#/) continue
-                            break
-                        }
-                        if (!has) continue
-                    }
-                    print L[i]
-                }
-            }
-        ' "$tmp" > "$tmp.out" && mv "$tmp.out" "$tmp"
-    fi
-    # 注入:已有 prepend-rules: 则标记规则块(不带键)插到该行之后,否则文件顶部插入完整块
-    # 注意:多行文本走环境变量传递(macOS awk 的 -v 不支持含换行的字符串);先写中间文件再替换,失败不碰原文件
-    if grep -q '^prepend-rules:' "$tmp"; then
-        if MARK0="$B0" MARK1="$B1" RULES="$rules" awk '
-            /^prepend-rules:/ && !done {
-                print
-                print "  " ENVIRON["MARK0"]
-                printf "%s", ENVIRON["RULES"]
-                print "  " ENVIRON["MARK1"]
-                done=1
-                next
-            }
-            { print }
-        ' "$tmp" > "$tmp.out"; then
-            mv "$tmp.out" "$M" && rm -f "$tmp"
-        else
-            rm -f "$tmp" "$tmp.out"
-            return 1
-        fi
-    else
-        {
-            echo "# Claude 全家族及生态域名置顶强制走代理(优先级高于任何国内规则集)"
-            echo "$B0"
-            echo "prepend-rules:"
-            printf "%s" "$rules"
-            echo "$B1"
-            echo ""
-            cat "$tmp"
-        } > "$tmp.out" && mv "$tmp.out" "$M" && rm -f "$tmp"
-    fi
-    rm -f "$tmp"
+    python3 "$helper" --group "$PROXY_GROUP"
 }
 
 # 一键修复:按项自动修复,每步输出结果
@@ -850,6 +775,9 @@ ASEOF
         echo "FIX:IPv6/进程监测 无需修复 ✓"
     fi
 
+    if [ "$PROXY_MODE" = "clash-verge" ]; then
+        write_merge_rules || echo "FIX:订阅防护未完成,请按提示核对专用脚本配置"
+    fi
     echo "FIX:保留现有时区、地区格式与客户端语言;如需调整请使用显式地区设置"
     network_evidence
     echo "FIX:实际路由=$ROUTE_STATE:$ROUTE_DETAIL"

@@ -32,7 +32,13 @@ class EnvironmentCheckTests(unittest.TestCase):
         (self.base / 'stun-probe.py').write_text("import os\nprint(os.environ.get('FAKE_STUN', 'RESULT:192.0.2.20'))\n")
         (self.base / 'network-audit.py').write_text("print('route\\tinfo\\t隔离测试的已核验探测连接')\n")
         self.fake('curl', r'''
-for value do last=$value; done
+headers=""; next_header=0
+for value do
+ if [ "$next_header" = 1 ]; then headers="$value"; next_header=0; fi
+ [ "$value" = '-D' ] && next_header=1
+ last=$value
+done
+[ -n "$headers" ] && printf '%s\n' "${FAKE_WEB_HEADER:-}" > "$headers"
 case "$last" in
  *cdn-cgi/trace) printf 'ip=%s\nloc=%s\n' "${FAKE_IP:-192.0.2.20}" "${FAKE_COUNTRY:-US}";;
  *ipinfo.io/json) printf '{"org":"%s"}\n' "${FAKE_ORG-AS174 Cogent Communications, LLC}";;
@@ -412,6 +418,19 @@ esac
         self.assertIn('FAIL:未能打开Claude', result.stdout)
         self.assertNotIn('INFO:当前已是账号', result.stdout)
         self.assertEqual((self.base / 'current').read_text(), 'A')
+
+    def test_confirmed_cloudflare_challenge_is_scoped_information(self):
+        row = self.row('生态可达性', FAKE_WEB_STATUS='403', FAKE_API_STATUS='401', FAKE_WEB_HEADER='CF-Mitigated: challenge\r')
+        self.assertTrue(row.startswith('info:'), row)
+        self.assertIn('账号权限未验证', row)
+
+    def test_unconfirmed_web_block_remains_warning(self):
+        row = self.row('生态可达性', FAKE_WEB_STATUS='403', FAKE_API_STATUS='401', FAKE_WEB_HEADER='Server: cloudflare')
+        self.assertTrue(row.startswith('warn:'), row)
+
+    def test_challenge_marker_does_not_clear_api_denial(self):
+        row = self.row('生态可达性', FAKE_WEB_STATUS='403', FAKE_API_STATUS='403', FAKE_WEB_HEADER='cf-mitigated: challenge')
+        self.assertTrue(row.startswith('warn:'), row)
 
     def test_new_archive_open_failure_keeps_the_actual_profile_and_previous_archive(self):
         (self.base / 'current').write_text('A')

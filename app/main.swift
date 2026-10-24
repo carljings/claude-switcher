@@ -69,7 +69,7 @@ final class VM: ObservableObject {
         CheckRow(name: "IP 与上次一致", icon: "checkmark.seal"),
         CheckRow(name: "时区（严格）", icon: "clock"),
         CheckRow(name: "地区格式（严格）", icon: "flag"),
-        CheckRow(name: "IPv6 关闭", icon: "6.circle"),
+        CheckRow(name: "Wi-Fi IPv6", icon: "6.circle"),
         CheckRow(name: "DNS 映射", icon: "magnifyingglass"),
         CheckRow(name: "WebRTC", icon: "eye.slash"),
         CheckRow(name: "桌面进程监测", icon: "hand.raised"),
@@ -201,7 +201,7 @@ final class VM: ObservableObject {
             let keyMap: [String: String] = [
                 "代理内核": "代理内核", "TUN网卡": "TUN 网卡", "出口IP": "出口 IP",
                 "IP一致": "IP 与上次一致", "时区": "时区（严格）", "地区": "地区格式（严格）",
-                "IPv6": "IPv6 关闭", "DNS": "DNS 映射", "WebRTC": "WebRTC",
+                "IPv6": "Wi-Fi IPv6", "DNS": "DNS 映射", "WebRTC": "WebRTC",
                 "保镖": "桌面进程监测", "规则置顶": "探测路由",
                 "客户端语言": "客户端语言", "ASN属性": "ASN 属性", "生态可达性": "服务响应",
             ]
@@ -733,11 +733,12 @@ struct CheckDetailView: View {
     }
     private var guidance: String {
         switch row.name {
+        case "Wi-Fi IPv6": return "本项核对Wi-Fi接口设置。Clash内核的IPv6状态由探测路由单独严格核验，Wi-Fi关闭不能代表内核也关闭；其他物理接口需分别核对。"
         case "DNS 映射": return "Fake-IP 只证明域名被映射。可在实际使用的浏览器运行 DNS 测试，再结合 Clash 日志核对上游路径；解析器地区不同本身不等于泄漏。"
         case "WebRTC": return "当前策略核验列出的4个STUN域名和UDP 3478/5349/19302拒绝规则。它可能影响使用这些端口的实时通话，未覆盖所有端口；Edge的实际表现仍需在Edge实测。"
         case "桌面进程监测": return "服务启用后约每 10 秒检查一次。Claude 桌面端未运行时待命；运行后重新扫描可查看近期核验。它仅保护桌面主进程，有检测窗口，不是系统防火墙。"
         case "ASN 属性": return "IPPure/Ping0 的截图可以佐证第三方住宅标签，不能单独证明物理住宅接入。无需为了去掉说明而伪造或更改 ASN。"
-        case "服务响应", "生态可达性": return "这项只检查Claude网页与API的匿名HTTP响应。网页403表示匿名请求被拒绝，可能需要浏览器验证；API401表示未认证。已有HTTP响应不等于账号可用，也不能据此判定封号。出现on hold时应在官方受限页面查看详情或请求复核。"
+        case "服务响应", "生态可达性": return "这项只检查Claude网页与API的匿名HTTP响应。只有明确检测到cf-mitigated: challenge的403加匿名API401才显示灰色说明；其他403继续提醒，传输失败仍阻断。浏览器验证需在官方页面完成，HTTP响应不验证账号权限，也不能据此判定封号。"
         default: return ""
         }
     }

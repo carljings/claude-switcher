@@ -7,6 +7,8 @@ shasum -a 256 \
     core/network-audit.py \
     core/stun-probe.py \
     core/protected-access.py \
+    core/clash-profile-guard.py \
+    core/clash-profile-guard.js \
     daemons/claude-bodyguard.sh \
     daemons/tz-watchdog.sh \
     daemons/local.claude-bodyguard.plist \
