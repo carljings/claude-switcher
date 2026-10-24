@@ -144,8 +144,8 @@ fi
 PROXY_MODE="clash-verge"       # 代理客户端: clash-verge|shadowrocket|sing-box|clashx|surge|auto
 PROXY_GROUP="IpEqual"          # Clash 代理组名(安装时自动探测)
 COUNTRY_TARGET="US"            # 目标出口国家(安装时按出口自动识别)
-TZ_TARGET="America/New_York"   # 锁定时区,应与出口IP所在城市一致
-LOCALE_TARGET="en_US"          # 锁定地区格式
+TZ_TARGET="America/New_York"   # 本地严格基线,不是官方封禁规则
+LOCALE_TARGET="en_US"          # 本地严格地区格式基线
 # ============================================================
 
 DATA="$HOME/Library/Application Support/Claude"
@@ -153,7 +153,7 @@ BASE="$HOME/.claude-switcher"
 LOG="$HOME/Library/Logs/claude-switch.log"
 CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
 ROUTE_MISSED=""
-mkdir -p "$BASE/accounts"
+case "${1:-}" in expected-exit|network-report|fingerprint|account-note|support-report|protected-check|protected-browser|provider-audit) ;; *) mkdir -p "$BASE/accounts" ;; esac
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
 
@@ -210,25 +210,6 @@ proxy_alive() {
     esac
 }
 
-# 置顶规则配置检查(仅 Clash Verge):合并配置里是否含置顶规则
-merge_ok() {
-    grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null
-}
-
-# 置顶规则行为检测:三个生态域名全部解析到 fake-ip 段(198.18.x.x)即视为已置顶;未命中域名记入 ROUTE_MISSED
-route_ok() {
-    ROUTE_MISSED=""
-    local d a
-    for d in claude.ai api.anthropic.com claudeusercontent.com; do
-        a=$(dig +short +time=3 +tries=1 "$d" 2>/dev/null | head -1)
-        case "$a" in
-            198.18.*) ;;
-            *) ROUTE_MISSED="$ROUTE_MISSED $d" ;;
-        esac
-    done
-    [ -z "$ROUTE_MISSED" ]
-}
-
 # 国家代码 → 地区格式映射(未收录的国家回退 en_US)
 locale_for() {
     case "$1" in
@@ -238,7 +219,7 @@ locale_for() {
     esac
 }
 
-# IP 审查:记录出口IP并统计最近48h内不同IP个数(账号画像风险指标)
+# 出口记录:统计最近48h内不同IP个数,仅作稳定性提示
 iphist_count() {
     [ -z "$1" ] && { echo 0; return; }
     local HIST="$BASE/iphistory.log"
@@ -247,7 +228,304 @@ iphist_count() {
     # 裁掉48小时(172800秒)以前的记录
     awk -v cutoff=$((now-172800)) '$2>=cutoff' "$HIST" > "$HIST.tmp" && mv "$HIST.tmp" "$HIST"
     # 统计48h内不同IP个数
-    awk '{print $1}' "$HIST" | sort -u | wc -l | tr -d ' '
+    awk -v acknowledged="${HISTORY_ACK_BEFORE:-0}" '$2>acknowledged {print $1}' "$HIST" | sort -u | wc -l | tr -d ' '
+}
+
+# 人工确认按实际IPv4绑定;STUN策略另从当前控制器读取,不信任人工勾选。
+load_check_context() {
+    HISTORY_ACK_BEFORE=0; WEB_LOGIN_REVIEW=""; ASN_REVIEW=""; STUN_BLOCK_POLICY=""
+    local key value
+    while IFS=$'\t' read -r key value; do
+        case "$key" in
+            history) HISTORY_ACK_BEFORE="$value" ;;
+            web) WEB_LOGIN_REVIEW="$value" ;;
+            asn) ASN_REVIEW="$value" ;;
+            stun) STUN_BLOCK_POLICY="$value" ;;
+        esac
+    done < <(python3 - "$BASE" "$1" "$PROXY_GROUP" <<'PY_CHECK_CONTEXT'
+import datetime
+import http.client
+import ipaddress
+import json
+from pathlib import Path
+import socket
+import sys
+import time
+
+base = Path(sys.argv[1])
+try:
+    ip = str(ipaddress.IPv4Address(sys.argv[2]))
+except ValueError:
+    raise SystemExit(0)
+
+def clean(value):
+    return isinstance(value, str) and 0 < len(value) <= 500 and all(ord(c) >= 32 for c in value)
+
+try:
+    record = json.loads((base / 'reviewed-checks.json').read_text())['exits'].get(ip, {})
+    ack = record.get('history_ack_before', 0)
+    if type(ack) is int and 0 < ack <= time.time():
+        print('history\t' + str(ack))
+    web = record.get('web_login_confirmed_on', '')
+    if clean(web) and datetime.date.fromisoformat(web) <= datetime.date.today():
+        print('web\t' + web)
+    asn = record.get('ip_type_review', '')
+    if clean(asn):
+        print('asn\t' + asn)
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    pass
+
+try:
+    policy = json.loads((base / 'exit-policy.json').read_text())
+    if policy.get('mode') != 'clash-selector' or policy.get('group') != sys.argv[3]:
+        raise ValueError('unsupported controller policy')
+    class UnixHTTP(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(2)
+            self.sock.connect(policy['controller_socket'])
+    client = UnixHTTP('localhost', timeout=2)
+    def query(path):
+        client.request('GET', path, headers={'Authorization': 'Bearer ' + policy['controller_secret']})
+        response = client.getresponse()
+        raw = response.read(2097153)
+        if response.status != 200 or len(raw) > 2097152:
+            raise ValueError('controller response unavailable')
+        return json.loads(raw)
+    try:
+        config = query('/configs')
+        if config.get('mode') != 'rule' or config.get('tun', {}).get('enable') is not True:
+            raise ValueError('rule/TUN inactive')
+        hosts = ['stun.miwifi.com', 'stun.chat.bilibili.com', 'stun.l.google.com', 'stun.cloudflare.com']
+        remaining = {f'((Network,udp) && (Domain,{host}))' for host in hosts}
+        ports = set(f'((Network,udp) && (DstPort,{port}))' for port in [3478, 5349, 19302])
+        for rule in query('/rules')['rules']:
+            kind, payload = rule.get('type'), rule.get('payload', '')
+            if kind == 'AND' and rule.get('proxy') == 'REJECT' and payload.startswith('((Network,udp) && ('):
+                remaining.discard(payload)
+                ports.discard(payload)
+            elif kind == 'IPCIDR' and not ipaddress.ip_network(payload).overlaps(ipaddress.ip_network('198.18.0.0/15')):
+                continue
+            else:
+                break  # 不越过可能抢先匹配的其他规则。
+            if not remaining and not ports:
+                print('stun\t已核验4个STUN域名及3478/5349/19302端口UDP拒绝;未全面验证浏览器路径')
+                break
+    finally:
+        client.close()
+except (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException):
+    pass
+PY_CHECK_CONTEXT
+    )
+}
+
+# 私有固定出口基线,或跟随明确配置的Clash选择组;不自动学习实际探测值。
+expected_exit_ip() {
+    local pin="$BASE/expected-exit-ip" policy="$BASE/exit-policy.json"
+    if [ ! -e "$pin" ] && [ ! -L "$pin" ] && [ ! -e "$policy" ] && [ ! -L "$policy" ]; then
+        return 0
+    fi
+    python3 - "$pin" "$policy" "$PROXY_GROUP" "$COUNTRY_TARGET" "${1:-ip}" <<'PY_EXPECTED_IP'
+import http.client
+import ipaddress
+import json
+import pathlib
+import re
+import socket
+import sys
+from urllib.parse import quote
+
+try:
+    pin, policy = map(pathlib.Path, sys.argv[1:3])
+    if policy.exists() or policy.is_symlink():
+        data = json.loads(policy.read_text())
+        if not isinstance(data, dict) or data.get('mode') != 'clash-selector' or data.get('group') != sys.argv[3]:
+            raise ValueError('invalid policy')
+        nodes = data['nodes']
+        if not isinstance(nodes, dict) or not nodes or not all(isinstance(k, str) for k in nodes):
+            raise ValueError('invalid nodes')
+        expected = {}
+        for name, node in nodes.items():
+            ip, country = (node['ip'], node['country']) if isinstance(node, dict) else (node, sys.argv[4])
+            if not isinstance(country, str) or not re.fullmatch('[A-Z]{2}', country):
+                raise ValueError('invalid country')
+            expected[name] = (str(ipaddress.IPv4Address(ip)), country)
+        address, secret = data['controller_socket'], data['controller_secret']
+        if not isinstance(address, str) or not address.startswith('/') or not isinstance(secret, str):
+            raise ValueError('invalid controller')
+
+        class UnixHTTP(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.settimeout(3)
+                self.sock.connect(address)
+
+        client = UnixHTTP('localhost', timeout=3)
+        try:
+            client.request('GET', '/proxies/' + quote(data['group'], safe=''),
+                           headers={'Authorization': 'Bearer ' + secret})
+            response = client.getresponse()
+            raw = response.read(65537)
+            if response.status != 200 or len(raw) > 65536:
+                raise ValueError('invalid controller response')
+            selected = json.loads(raw)
+            if not isinstance(selected, dict) or selected.get('type') != 'Selector':
+                raise ValueError('invalid selector')
+            value = expected[selected['now']]
+        finally:
+            client.close()
+        if (pin.exists() or pin.is_symlink()) and value[0] != str(ipaddress.IPv4Address(pin.read_text().strip())):
+            raise ValueError('selected exit differs from fixed pin')
+    else:
+        value = (str(ipaddress.IPv4Address(pin.read_text().strip())), sys.argv[4])
+    print('\t'.join(value) if sys.argv[5] == 'identity' else value[0])
+except (OSError, UnicodeError, ValueError, KeyError, TypeError, http.client.HTTPException):
+    # Do not print controller credentials, private paths or response contents.
+    raise SystemExit(1)
+PY_EXPECTED_IP
+}
+
+assess_exit() {
+    EXIT_STATE="ok"
+    EXIT_DETAIL="${1:-无}/${2:-未知}"
+    local expected="" identity="" target_country="$COUNTRY_TARGET"
+    identity=$(expected_exit_ip identity 2>/dev/null) || {
+        EXIT_STATE="fail"; EXIT_DETAIL="固定出口配置无效或选择组查询失败"; return;
+    }
+    if [ -n "$identity" ]; then
+        IFS=$'\t' read -r expected target_country <<< "$identity"
+    fi
+    if [ "${3:-0}" != "0" ] || [ -z "$1" ] || [ "$2" != "$target_country" ]; then
+        EXIT_STATE="fail"
+        EXIT_DETAIL="$EXIT_DETAIL(期望国家${target_country};探测退出码${3:-0})"
+    elif [ -n "$expected" ] && [ "$1" != "$expected" ]; then
+        EXIT_STATE="fail"
+        EXIT_DETAIL="$EXIT_DETAIL(与固定出口${expected}不一致)"
+    elif [ -n "$expected" ]; then
+        EXIT_DETAIL="$EXIT_DETAIL;固定出口匹配"
+    fi
+}
+
+# 无认证HTTP探测:传输、访问状态与账号权限是不同结论。
+assess_access() {
+    ACCESS_STATE="ok"
+    ACCESS_DETAIL="claude.ai:$1 API:$2;未携带凭据,账号未验证"
+    if [ "$3" != "0" ] || [ "$4" != "0" ]; then
+        ACCESS_STATE="fail"; ACCESS_DETAIL="传输失败(退出码$3/$4);$ACCESS_DETAIL"
+        return
+    fi
+    case "$1/$2" in
+        [1-5][0-9][0-9]/[1-5][0-9][0-9]) ;;
+        *) ACCESS_STATE="fail"; ACCESS_DETAIL="未取得有效HTTP响应;$ACCESS_DETAIL"; return ;;
+    esac
+    case "$1/$2" in
+        *429*) ACCESS_STATE="warn"; ACCESS_DETAIL="限流,请查看官方用量并稍后重试;$ACCESS_DETAIL" ;;
+        5*|*/5*) ACCESS_STATE="warn"; ACCESS_DETAIL="服务端异常,请核对官方状态;$ACCESS_DETAIL" ;;
+        401/*|403/*|*/403|*/407) ACCESS_STATE="warn"; ACCESS_DETAIL="访问受限或需要验证,请在官方应用确认;$ACCESS_DETAIL" ;;
+        [23]*/401|[23]*/[23]*) ;;
+        *) ACCESS_STATE="warn"; ACCESS_DETAIL="HTTP访问未确认;$ACCESS_DETAIL" ;;
+    esac
+    if [ "$1/$2" = "403/401" ] && [ -n "${WEB_LOGIN_REVIEW:-}" ]; then
+        ACCESS_DETAIL="$ACCESS_DETAIL;旧IP登录备注${WEB_LOGIN_REVIEW},不代表当前账号状态"
+    fi
+}
+
+# 用户选择的严格基线;网络修复保留设置,不自动放宽或改写偏好。
+preference_rows() {
+    local actual state lang
+    actual=$(readlink /etc/localtime 2>/dev/null)
+    state="fail"; [ "$actual" = "/var/db/timezone/zoneinfo/$TZ_TARGET" ] && state="ok"
+    echo "时区=$state:${actual##*/};本地严格基线$TZ_TARGET,非官方封禁判据"
+    actual=$(defaults read -g AppleLocale 2>/dev/null)
+    state="fail"; [ "$actual" = "$LOCALE_TARGET" ] && state="ok"
+    echo "地区=$state:${actual:-未知};本地严格基线$LOCALE_TARGET"
+    lang=$(defaults read com.anthropic.claudefordesktop AppleLanguages 2>/dev/null | tr -d '(),"' | awk 'NF {print $1; exit}')
+    [ -n "$lang" ] || lang=$(defaults read -g AppleLanguages 2>/dev/null | tr -d '(),"' | awk 'NF {print $1; exit}')
+    state="fail"; [[ "$lang" == en* ]] && state="ok"
+    echo "客户端语言=$state:${lang:-未知};本地严格基线为英文"
+}
+
+# 同一STUN结论供启动检查、界面和修复复用。
+assess_webrtc() {
+    WEBRTC_STATE="ok"; WEBRTC_DETAIL="探测服务仅返回当前出口;不代表全部浏览器路径"
+    local wr="$1" baseline="$2" w leak="" OLDIFS
+    case "$wr" in
+        RESULT:NONE)
+            WEBRTC_STATE="fail"; WEBRTC_DETAIL="STUN无响应且缺少拒绝规则证据;严格策略阻止启动"
+            if [ -n "${STUN_BLOCK_POLICY:-}" ]; then
+                WEBRTC_STATE="info"; WEBRTC_DETAIL="$STUN_BLOCK_POLICY"
+            fi ;;
+        RESULT:*)
+            if [ -z "${wr#RESULT:}" ] || [ -z "$baseline" ]; then
+                WEBRTC_STATE="fail"; WEBRTC_DETAIL="探测结果或出口基线无效"; return
+            fi
+            OLDIFS=$IFS; IFS=','
+            for w in ${wr#RESULT:}; do [ "$w" != "$baseline" ] && leak="$leak $w"; done
+            IFS=$OLDIFS
+            if [ -n "$leak" ]; then
+                WEBRTC_STATE="fail"; WEBRTC_DETAIL="STUN探测发现不同公网地址:${leak# }"
+            fi ;;
+        *) WEBRTC_STATE="fail"; WEBRTC_DETAIL="STUN检测异常,未取得有效结果" ;;
+    esac
+}
+
+network_evidence() {
+    ROUTE_STATE="fail"; ROUTE_DETAIL="当前客户端实际路由未核验;严格策略阻止启动"
+    PROBE_WEB=""; PROBE_API=""; PROBE_WEB_RC=1; PROBE_API_RC=1
+    [ "$PROXY_MODE" = "clash-verge" ] || return 0
+    local helper="$BASE/network-audit.py" key value detail
+    if [ -e "$BASE/exit-policy.json" ] || [ -L "$BASE/exit-policy.json" ]; then ROUTE_STATE="fail"; fi
+    [ -f "$helper" ] || helper="$(dirname "$0")/network-audit.py"
+    if [ ! -f "$helper" ]; then
+        [ ! -e "$BASE/exit-policy.json" ] || ROUTE_STATE="fail"
+        ROUTE_DETAIL="网络核验模块缺失,请完整更新安装"; return 0
+    fi
+    while IFS=$'\t' read -r key value detail; do
+        case "$key" in
+            route) ROUTE_STATE="$value"; ROUTE_DETAIL="$detail" ;;
+            web) PROBE_WEB="$value"; PROBE_WEB_RC="$detail" ;;
+            api) PROBE_API="$value"; PROBE_API_RC="$detail" ;;
+        esac
+    done < <(python3 "$helper" --home "$HOME" --group "$PROXY_GROUP" --country "$COUNTRY_TARGET" --tsv 2>/dev/null)
+    if [ "$ROUTE_STATE" = "warn" ]; then
+        ROUTE_STATE="fail"; ROUTE_DETAIL="$ROUTE_DETAIL;严格策略阻止启动"
+    fi
+}
+
+access_probe() {
+    if [ -n "$PROBE_WEB" ] && [ -n "$PROBE_API" ]; then
+        r1="$PROBE_WEB"; r2="$PROBE_API"; rc1="$PROBE_WEB_RC"; rc2="$PROBE_API_RC"
+    else
+        r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null); rc1=$?
+        r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null); rc2=$?
+    fi
+    assess_access "$r1" "$r2" "$rc1" "$rc2"
+}
+
+# 注册不等于实时保护。状态由root所有的保镖模块落在系统安装目录。
+guard_status() {
+    if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
+        echo '保镖=fail:桌面进程监测服务未注册'; return
+    fi
+    python3 - '/Library/Application Support/claude-switcher/guard-status.json' <<'PY_GUARD_STATUS'
+import json
+from pathlib import Path
+import sys
+import time
+try:
+    data = json.loads(Path(sys.argv[1]).read_text())
+    age = time.time() - data['checked_at']
+    if not 0 <= age <= 90:
+        raise ValueError('stale')
+    if data['state'] == 'idle':
+        print('保镖=info:桌面端未运行,监测待命;仅进程级保护,存在检测窗口')
+    elif data['state'] == 'info' and data.get('network_verified'):
+        print('保镖=info:近期已核对所选出口及API探测链路;仅桌面进程保护,非防火墙')
+    else:
+        print('保镖=warn:出口监测未确认或出现异常;请查看守护记录;非防火墙保证')
+except (OSError, ValueError, KeyError, TypeError):
+    print('保镖=warn:服务已注册,但无近期出口监测证据;旧版仅检查内核/TUN')
+PY_GUARD_STATUS
 }
 
 # ---------- 安全检查 ----------
@@ -258,9 +536,12 @@ check() {
     tun_up || fails="$fails;TUN网卡不在线"
 
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    trace_rc=$?
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
-    [ "$loc" = "$COUNTRY_TARGET" ] || fails="$fails;出口IP异常(${ip:-无}/${loc:-未知},期望$COUNTRY_TARGET)"
+    assess_exit "$ip" "$loc" "$trace_rc"
+    [ "$EXIT_STATE" = "ok" ] || fails="$fails;出口IP异常($EXIT_DETAIL)"
+    load_check_context "$ip"
     ipwarn=""
     lastip=""; [ -f "$BASE/lastip" ] && lastip=$(cat "$BASE/lastip")
     if [ -n "$ip" ] && [ -n "$lastip" ] && [ "$ip" != "$lastip" ]; then
@@ -268,58 +549,36 @@ check() {
     fi
     [ -n "$ip" ] && echo "$ip" > "$BASE/lastip"
 
-    # IP 审查:48h 内出口 IP 变化 ≥3 次追加警告(只 warn 不 fail)
+    # 不同IP个数不是切换次数,也不是已知的官方封禁阈值。
     ipn=$(iphist_count "$ip")
     if [ "$ipn" -ge 3 ] 2>/dev/null; then
-        ipwarn="${ipwarn:+$ipwarn; }注意:48h内出口IP变化${ipn}次,账号画像有风险,建议固定节点"
+        ipwarn="${ipwarn:+$ipwarn; }48h内出现${ipn}个不同IP,请确认是否为计划内换线"
     fi
 
-    tz=$(readlink /etc/localtime 2>/dev/null)
-    [ "$tz" = "/var/db/timezone/zoneinfo/$TZ_TARGET" ] || fails="$fails;时区异常($tz)"
-
-    locale=$(defaults read -g AppleLocale 2>/dev/null)
-    [ "$locale" = "$LOCALE_TARGET" ] || fails="$fails;地区异常($locale)"
-
+    while IFS= read -r preference; do
+        case "$preference" in *=fail:*) fails="$fails;$preference" ;; esac
+    done < <(preference_rows)
     v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
     echo "$v6" | grep -qi 'off' || fails="$fails;IPv6未关闭"
 
     dnsip=$(dig +short +time=3 +tries=1 claude.ai 2>/dev/null | head -1)
     case "$dnsip" in
         198.18.*) ;;
-        *) fails="$fails;DNS未走隧道(返回${dnsip:-空})" ;;
+        *) ipwarn="${ipwarn:+$ipwarn; }DNS映射未确认(返回${dnsip:-空});请结合实际链路核验" ;;
     esac
 
     wr=$(webrtc_test)
-    if [ "$wr" != "RESULT:NONE" ]; then
-        case "$wr" in
-            RESULT:*)
-                wips=${wr#RESULT:}
-                leak=""
-                OLDIFS=$IFS; IFS=','
-                for w in $wips; do [ "$w" != "$ip" ] && leak="$leak $w"; done
-                IFS=$OLDIFS
-                [ -n "$leak" ] && fails="$fails;WebRTC泄漏($leak)" ;;
-            *) fails="$fails;WebRTC检测异常" ;;
-        esac
-    fi
+    assess_webrtc "$wr" "$ip"
+    [ "$WEBRTC_STATE" = "fail" ] && fails="$fails;$WEBRTC_DETAIL"
+    [ "$WEBRTC_STATE" = "warn" ] && ipwarn="${ipwarn:+$ipwarn; }$WEBRTC_DETAIL"
 
-    launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || fails="$fails;保镖未运行"
-
-    # 置顶规则:Clash Verge 看配置或行为任一通过;其他客户端只看行为检测
-    if [ "$PROXY_MODE" = "clash-verge" ]; then
-        merge_ok || route_ok || fails="$fails;置顶规则缺失"
-    else
-        route_ok || fails="$fails;置顶规则缺失(未命中:${ROUTE_MISSED# })"
-    fi
-
-    defaults read com.anthropic.claudefordesktop AppleLanguages 2>/dev/null | grep -q 'en-US' || {
-        syslang=$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2p' | tr -d ' ,"')
-        [[ "$syslang" == en* ]] || fails="$fails;客户端语言为中文"
-    }
-
-    r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
-    r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
-    { [ "$r1" = "000" ] || [ "$r2" = "000" ]; } && fails="$fails;Anthropic生态不可达($r1/$r2)"
+    launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || fails="$fails;桌面进程监测服务未注册"
+    network_evidence
+    [ "$ROUTE_STATE" = "fail" ] && fails="$fails;$ROUTE_DETAIL"
+    [ "$ROUTE_STATE" = "warn" ] && ipwarn="${ipwarn:+$ipwarn; }$ROUTE_DETAIL"
+    access_probe
+    [ "$ACCESS_STATE" = "fail" ] && fails="$fails;$ACCESS_DETAIL"
+    [ "$ACCESS_STATE" = "warn" ] && ipwarn="${ipwarn:+$ipwarn; }$ACCESS_DETAIL"
 
     if [ -n "$fails" ]; then
         echo "FAIL:${fails#;}"
@@ -346,9 +605,12 @@ checkdetail() {
     fi
     if tun_up; then echo 'TUN网卡=ok'; else echo 'TUN网卡=fail:不在线'; fi
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    trace_rc=$?
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
-    if [ "$loc" = "$COUNTRY_TARGET" ]; then echo "出口IP=ok:$ip/$loc"; else echo "出口IP=fail:${ip:-无}/${loc:-未知}(期望$COUNTRY_TARGET)"; fi
+    assess_exit "$ip" "$loc" "$trace_rc"
+    echo "出口IP=$EXIT_STATE:$EXIT_DETAIL"
+    load_check_context "$ip"
     lastip=""; [ -f "$BASE/lastip" ] && lastip=$(cat "$BASE/lastip")
     ipst=""; ipdt=""
     if [ -z "$ip" ]; then echo 'IP一致=fail:未获取到出口IP'
@@ -356,94 +618,60 @@ checkdetail() {
     elif [ "$ip" = "$lastip" ]; then ipst="ok"
     else ipst="warn"; ipdt="$lastip → $ip"; fi
     [ -n "$ip" ] && echo "$ip" > "$BASE/lastip"
-    # IP 审查:48h 内出口 IP 变化 ≥3 次提示账号画像风险(只 warn 不 fail)
+    # 保留历史,仅统计不同IP个数,不推断账号风险。
     if [ -n "$ipst" ]; then
         ipn=$(iphist_count "$ip")
         if [ "$ipn" -ge 3 ] 2>/dev/null; then
             if [ "$ipst" = "ok" ]; then
-                ipst="warn"; ipdt="48h内出口IP变化${ipn}次,账号画像有风险,建议固定节点"
+                ipst="warn"; ipdt="48h内出现${ipn}个不同IP,请确认是否为计划内换线"
             else
-                ipdt="$ipdt;48h内出口IP变化${ipn}次,账号画像有风险,建议固定节点"
+                ipdt="$ipdt;48h内出现${ipn}个不同IP,请确认是否为计划内换线"
             fi
+        fi
+        if [ "$ipst" = "ok" ] && [ "$HISTORY_ACK_BEFORE" -gt 0 ]; then
+            ipdt="当前出口与上次一致;旧调试记录已确认;后续历史继续统计"
         fi
         if [ -z "$ipdt" ]; then echo "IP一致=$ipst"; else echo "IP一致=$ipst:$ipdt"; fi
     fi
-    tz=$(readlink /etc/localtime 2>/dev/null)
-    if [ "$tz" = "/var/db/timezone/zoneinfo/$TZ_TARGET" ]; then echo '时区=ok'; else echo "时区=fail:$tz"; fi
-    locale=$(defaults read -g AppleLocale 2>/dev/null)
-    if [ "$locale" = "$LOCALE_TARGET" ]; then echo '地区=ok'; else echo "地区=fail:$locale"; fi
+    preference_rows
     v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
     if echo "$v6" | grep -qi 'off'; then echo 'IPv6=ok:已关闭'; else echo 'IPv6=fail:未关闭'; fi
     dnsip=$(dig +short +time=3 +tries=1 claude.ai 2>/dev/null | head -1)
     case "$dnsip" in
-        198.18.*) echo 'DNS=ok:走隧道' ;;
-        *) echo "DNS=fail:未走隧道(${dnsip:-空})" ;;
+        198.18.*) echo 'DNS=info:claude.ai返回Fake-IP;未单独验证全部上游DNS路径' ;;
+        *) echo "DNS=warn:映射返回${dnsip:-空};不能仅凭真实IP或无结果认定泄漏" ;;
     esac
     wr=$(webrtc_test)
-    case "$wr" in
-        RESULT:NONE) echo 'WebRTC=ok:UDP不出网,零暴露' ;;
-        RESULT:*)
-            wips=${wr#RESULT:}
-            leak=""
-            OLDIFS=$IFS; IFS=','
-            for w in $wips; do [ "$w" != "$ip" ] && leak="$leak $w"; done
-            IFS=$OLDIFS
-            if [ -n "$leak" ]; then echo "WebRTC=fail:暴露非代理IP:$leak"; else echo 'WebRTC=ok:仅暴露代理IP'; fi ;;
-        *) echo 'WebRTC=fail:检测异常' ;;
-    esac
-    if launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
-        lastkill=$(tail -1 "$HOME/Library/Logs/claude-bodyguard.log" 2>/dev/null | cut -c1-40)
-        echo "保镖=ok:${lastkill:-待命}"
+    assess_webrtc "$wr" "$ip"
+    echo "WebRTC=$WEBRTC_STATE:$WEBRTC_DETAIL"
+    guard_status
+    network_evidence
+    # info 是配套核验模块对成功探测的范围说明;本项只判定本次探测。
+    if [ "$ROUTE_STATE" = "info" ]; then
+        echo "规则置顶=ok:本次探测通过;$ROUTE_DETAIL"
     else
-        echo '保镖=fail:未安装'
+        echo "规则置顶=$ROUTE_STATE:$ROUTE_DETAIL"
     fi
-    # 置顶规则:Clash Verge 配置/行为双保险,其他客户端只看行为
-    if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if merge_ok; then
-            echo '规则置顶=ok'
-        elif route_ok; then
-            echo '规则置顶=ok:行为检测通过'
-        else
-            echo '规则置顶=fail:未生效'
-        fi
-    else
-        if route_ok; then
-            echo '规则置顶=ok:行为检测通过'
-        else
-            echo "规则置顶=fail:未命中(${ROUTE_MISSED# }),请在 $(proxy_name) 中自行加置顶规则"
-        fi
-    fi
-    # 12. Claude 客户端语言(单独设为英文,或系统首选语言为英文均可;防止 JS 层读出中文)
-    clang=$(defaults read com.anthropic.claudefordesktop AppleLanguages 2>/dev/null | head -2)
-    syslang=$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2p' | tr -d ' ,"')
-    if echo "$clang" | grep -q 'en-US'; then
-        echo '客户端语言=ok:en-US'
-    elif [[ "$syslang" == en* ]]; then
-        echo '客户端语言=ok:跟随系统(英文)'
-    else
-        echo '客户端语言=fail:跟随系统(中文)'
-    fi
-    # 13. ASN 网络属性(住宅宽带 vs 机房,按目标地区收录主流运营商)
+    # 13. 这里只查询ASN归属名称,不等同于单个IP的hosting/住宅用途分类。
     org=$(curl -s --max-time 6 https://ipinfo.io/json 2>/dev/null | grep '"org"' | cut -d'"' -f4)
+    if [ -n "$ASN_REVIEW" ]; then
+        echo "ASN属性=info:$ASN_REVIEW;实时归属${org:-未知}"
+    else
     case "$org" in
-        '') echo 'ASN属性=warn:未获取' ;;
+        '') echo 'ASN属性=warn:未获取ASN归属' ;;
         *Comcast*|*AT\&T*|*Verizon*|*Spectrum*|*Charter*|*Cox*|*T-Mobile*|*Cable*|*esidential*|\
         *NTT*|*KDDI*|*SoftBank*|*IIJ*|*OCN*|*So-net*|\
         *HiNet*|*Chunghwa*|*CHT*|*kbro*|*Taiwan*|*FarEasTone*|*Data\ Communication*|\
         *Singtel*|*StarHub*|*M1*|\
         *HKT*|*PCCW*|*HKBN*|*HGC*|\
         *BT*|*Sky*|*Virgin*|*TalkTalk*|*Vodafone*|\
-        *Deutsche\ Telekom*|*1\&1*|*O2*) echo "ASN属性=ok:$org" ;;
-        *) echo "ASN属性=warn:疑似机房($org)" ;;
+        *Deutsche\ Telekom*|*1\&1*|*O2*) echo "ASN属性=ok:$org(仅名称匹配,接入类型未验证)" ;;
+        *) echo "ASN属性=warn:类型待核验($org);未查询IP用途分类" ;;
     esac
-    # 14. Anthropic 生态可达性
-    r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
-    r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
-    if [ "$r1" != "000" ] && [ "$r2" != "000" ]; then
-        echo "生态可达性=ok:claude.ai:$r1 api:$r2"
-    else
-        echo "生态可达性=fail:claude.ai:$r1 api:$r2"
     fi
+    # 14. Anthropic 生态可达性
+    access_probe
+    echo "生态可达性=$ACCESS_STATE:$ACCESS_DETAIL"
 }
 
 # 置顶规则写入(智能合并):不整文件覆盖,用户已有的 Merge 配置原样保留
@@ -455,6 +683,15 @@ write_merge_rules() {
     mkdir -p "$CLASH_DIR/profiles"
     # 置顶规则清单(缩进两格)
     rules=""
+    # HTTP固定出口不承载UDP。先拒绝已知STUN端口与域名,TCP规则不变。
+    for p in 3478 5349 19302; do
+        rules="$rules  - AND,((NETWORK,udp),(DST-PORT,$p)),REJECT
+"
+    done
+    for h in stun.miwifi.com stun.chat.bilibili.com stun.l.google.com stun.cloudflare.com; do
+        rules="$rules  - AND,((NETWORK,udp),(DOMAIN,$h)),REJECT
+"
+    done
     for d in claude.ai claude.com anthropic.com claudeusercontent.com challenges.cloudflare.com datadoghq.com segment.io stripe.com stripe.network stripecdn.com intercom.io intercomcdn.com intercomassets.com; do
         rules="$rules  - DOMAIN-SUFFIX,$d,$PROXY_GROUP
 "
@@ -591,119 +828,47 @@ fix() {
         fi
     fi
 
-    # B. 时区/IPv6/DNS缓存/保镖(需管理员权限,会弹一次密码框)
-    tz=$(readlink /etc/localtime 2>/dev/null)
+    # B. 网络修复不修改时区、地区格式或客户端语言。
     v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
     adminCmds=""
-    [ "$tz" != "/var/db/timezone/zoneinfo/$TZ_TARGET" ] && adminCmds="${adminCmds}/usr/sbin/systemsetup -settimezone $TZ_TARGET; "
     echo "$v6" | grep -qi 'off' || adminCmds="${adminCmds}networksetup -setv6off Wi-Fi; "
     if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
         adminCmds="${adminCmds}cp $HOME/.local/bin/local.claude-bodyguard.plist /Library/LaunchDaemons/ && chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist && launchctl bootstrap system /Library/LaunchDaemons/local.claude-bodyguard.plist; "
     fi
     if [ -n "$adminCmds" ]; then
         adminCmds="${adminCmds}dscacheutil -flushcache; killall -HUP mDNSResponder"
-        echo "FIX:修复时区/IPv6/DNS/保镖(需要密码)..."
+        echo "FIX:修复IPv6/DNS/进程监测(需要密码)..."
         if osascript <<ASEOF >/dev/null 2>&1
 do shell script "$adminCmds" with prompt "一键修复需要管理员权限" with administrator privileges
 ASEOF
         then
-            echo "FIX:时区/IPv6/DNS/保镖 ✓"
+            echo "FIX:IPv6/DNS/进程监测 ✓"
         else
-            echo "FIX:时区/IPv6/保镖 ✗(取消或失败)"
+            echo "FIX:IPv6/进程监测 ✗(取消或失败)"
         fi
     else
-        echo "FIX:时区/IPv6/保镖 无需修复 ✓"
+        echo "FIX:IPv6/进程监测 无需修复 ✓"
     fi
 
-    # B3. Claude 客户端单独设英文(用户级,无需密码;系统首选语言已是英文则跳过)
-    syslang=$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2p' | tr -d ' ,"')
-    if ! defaults read com.anthropic.claudefordesktop AppleLanguages 2>/dev/null | grep -q 'en-US' && [[ "$syslang" != en* ]]; then
-        defaults write com.anthropic.claudefordesktop AppleLanguages -array en-US
-        echo "FIX:Claude 客户端语言 → en-US ✓(重启 Claude 后生效)"
-    fi
-
-    # B4. 地区格式(用户级,无需密码)
-    locale=$(defaults read -g AppleLocale 2>/dev/null)
-    if [ "$locale" != "$LOCALE_TARGET" ]; then
-        defaults write -g AppleLocale "$LOCALE_TARGET"
-        echo "FIX:地区格式 → $LOCALE_TARGET ✓"
-    fi
-
-    # B2. 置顶规则缺失 → Clash Verge 智能合并写入 Merge 配置并重启;其他客户端提示自行配置
-    if [ "$PROXY_MODE" = "clash-verge" ]; then
-        if ! merge_ok && ! route_ok; then
-            echo "FIX:写入置顶规则(智能合并,不动你的已有配置)..."
-            write_merge_rules
-            osascript -e 'tell application "Clash Verge" to quit' >/dev/null 2>&1
-            sleep 3
-            open -a "Clash Verge"
-            for i in $(seq 1 40); do
-                tun_up && break
-                sleep 1
-            done
-            grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null \
-                && echo "FIX:置顶规则 ✓" || echo "FIX:置顶规则 ✗"
-        fi
-    else
-        if ! route_ok; then
-            echo "FIX:置顶规则 ✗(未命中:${ROUTE_MISSED# }) — 请在 $(proxy_name) 中自行添加 DOMAIN-SUFFIX 置顶规则"
-        fi
-    fi
+    echo "FIX:保留现有时区、地区格式与客户端语言;如需调整请使用显式地区设置"
+    network_evidence
+    echo "FIX:实际路由=$ROUTE_STATE:$ROUTE_DETAIL"
 
     # C. WebRTC 泄漏专项:在 TUN/IPv6 已处理后复测;UDP 仍绕过隧道时重载 TUN 再测一次
     wrip=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2)
     wr=$(webrtc_test)
-    wr_leak() {
-        case "$1" in
-            RESULT:NONE|"") echo "" ;;
-            RESULT:*)
-                wrl=""
-                OLDIFS=$IFS; IFS=','
-                for w in ${1#RESULT:}; do
-                    [ -n "$2" ] && [ "$w" != "$2" ] && wrl="$wrl $w"
-                done
-                IFS=$OLDIFS
-                echo "${wrl# }" ;;
-            *) echo "" ;;
-        esac
-    }
-    leak=$(wr_leak "$wr" "$wrip")
-    if [ "$wr" = "RESULT:NONE" ]; then
-        echo "FIX:WebRTC ✓ (UDP不出网,零暴露)"
-    elif [ -z "$wr" ]; then
-        echo "FIX:WebRTC - 检测无结果(请确认 python3 与 stun-probe.py 就绪)"
-    elif [ -n "$leak" ] && [ "$PROXY_MODE" = "clash-verge" ] && tun_up; then
-        echo "FIX:WebRTC 泄漏($leak),重载 TUN 后复测..."
-        osascript -e 'tell application "Clash Verge" to quit' >/dev/null 2>&1
-        sleep 3
-        open -a "Clash Verge"
-        for i in $(seq 1 30); do tun_up && break; sleep 1; done
-        sleep 2
-        wr=$(webrtc_test)
-        leak=$(wr_leak "$wr" "$wrip")
-        if [ "$wr" = "RESULT:NONE" ] || [ -z "$leak" ]; then
-            echo "FIX:WebRTC ✓ (TUN 重载后 UDP 已回到隧道)"
-        else
-            echo "FIX:WebRTC ✗ 仍有 UDP 绕过隧道:${leak:-未知}"
-            echo "FIX:请确认 TUN 已开启且节点支持 UDP;浏览器插件只能保护该浏览器,保护不了 Claude 桌面版和其他应用"
-        fi
-    elif [ -n "$leak" ]; then
-        echo "FIX:WebRTC ✗ UDP 绕过隧道($leak) — 当前客户端无法自动重载,请开启 TUN/UDP 转发"
-    else
-        echo "FIX:WebRTC ✓ (仅暴露代理出口IP)"
-    fi
+    load_check_context "$wrip"
+    assess_webrtc "$wr" "$wrip"
+    echo "FIX:WebRTC=$WEBRTC_STATE:$WEBRTC_DETAIL"
 
     # D. 出口IP最终验证
     sleep 2
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    trace_rc=$?
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
-    if [ "$loc" = "$COUNTRY_TARGET" ]; then
-        echo "FIX:出口IP ✓ ($ip/$loc)"
-    else
-        echo "FIX:出口IP ✗ (${ip:-无}/${loc:-未知},期望$COUNTRY_TARGET) — 可能是节点故障,请到 $(proxy_name) 里换条线路"
-    fi
-    echo "FIX:修复流程结束"
+    assess_exit "$ip" "$loc" "$trace_rc"
+    echo "FIX:出口IP=$EXIT_STATE:$EXIT_DETAIL"
 }
 
 # 地区自适应:按当前出口国家一键重设 国家/时区/地区格式(换了国家节点后运行)
@@ -756,96 +921,79 @@ ASEOF
     echo "OK:region=$loc tz=$ntz locale=$nlocale"
 }
 
-# 自动更新:拉取 main 分支最新代码,SHA256 校验+配置注入+自检+失败回滚(--auto 供 LaunchAgent 每12小时调用)
+# 定制版通过人工审阅合入上游,不下载远端包覆盖本机定制。
 self_update() {
-    if [ "${1:-}" = "--auto" ]; then auto=1; else auto=0; fi
-    # 路径全部从脚本自身位置推导,兼容旧版 LaunchDaemon(root) 混跑时 $HOME 不可靠的场景
-    BIN=$(cd "$(dirname "$0")" && pwd)
-    UHOME="${BIN%/.local/bin}"
-    [ "$UHOME" = "$BIN" ] && UHOME="$HOME"
-    if [ "$auto" -eq 1 ]; then
-        mkdir -p "$BASE"
-        exec >>"$BASE/update.log" 2>&1
-        echo "# $(date '+%F %T') update --auto 开始"
-    fi
-
-    tmpd=$(mktemp -d)
-    if ! curl -sL --max-time 30 "https://codeload.github.com/YOURSJEYO/claude-switcher/zip/refs/heads/main" -o "$tmpd/main.zip" \
-        || ! unzip -q "$tmpd/main.zip" -d "$tmpd" 2>/dev/null; then
-        echo "FAIL:下载或解压失败(网络问题,稍后再试)"; rm -rf "$tmpd"; return 1
-    fi
-    NEW="$tmpd/claude-switcher-main"
-    if [ ! -f "$NEW/core/claude-switch.sh" ]; then
-        echo "FAIL:远程包结构异常,已中止"; rm -rf "$tmpd"; return 1
-    fi
-
-    # 工件完整性校验:逐项比对仓库 SHA256SUMS,任一不符即中止(防传输篡改;信任根为 GitHub 仓库本身)
-    if ! curl -sL --max-time 15 "https://raw.githubusercontent.com/YOURSJEYO/claude-switcher/main/SHA256SUMS" -o "$tmpd/SHA256SUMS" \
-        || [ ! -s "$tmpd/SHA256SUMS" ]; then
-        echo "FAIL:无法获取校验清单(SHA256SUMS),已中止"; rm -rf "$tmpd"; return 1
-    fi
-    bad=0
-    while read -r sum rel; do
-        [ -z "$sum" ] && continue
-        if [ ! -f "$NEW/$rel" ] || [ "$(shasum -a 256 "$NEW/$rel" | awk '{print $1}')" != "$sum" ]; then
-            bad=1; break
-        fi
-    done < "$tmpd/SHA256SUMS"
-    if [ "$bad" -eq 1 ]; then
-        echo "FAIL:工件校验失败,已中止(不排除网络篡改,可稍后重试或手动 update)"; rm -rf "$tmpd"; return 1
-    fi
-
-    # 跳过判断:剔除头部5个配置行后与本地已安装版本比对,无差异即已是最新
-    strip_cfg() { grep -vE '^(PROXY_MODE|PROXY_GROUP|COUNTRY_TARGET|TZ_TARGET|LOCALE_TARGET)="' "$1"; }
-    if [ -f "$BIN/claude-switch.sh" ] && \
-       diff <(strip_cfg "$BIN/claude-switch.sh") <(strip_cfg "$NEW/core/claude-switch.sh") >/dev/null 2>&1; then
-        echo "OK:已是最新版本"; rm -rf "$tmpd"; return 0
-    fi
-
-    # 备份现有核心脚本
-    [ -f "$BIN/claude-switch.sh" ] && cp "$BIN/claude-switch.sh" "$BIN/claude-switch.sh.bak"
-
-    # 替换核心脚本 + 从 .bak 读出5个配置值注入新脚本
-    cp "$NEW/core/claude-switch.sh" "$BIN/claude-switch.sh"
-    PM=""; PG=""; CT=""; TZV=""; LCT=""
-    if [ -f "$BIN/claude-switch.sh.bak" ]; then
-        get_cfg() { grep "^$1=\"" "$BIN/claude-switch.sh.bak" | head -1 | cut -d'"' -f2; }
-        PM=$(get_cfg PROXY_MODE); PG=$(get_cfg PROXY_GROUP); CT=$(get_cfg COUNTRY_TARGET)
-        TZV=$(get_cfg TZ_TARGET); LCT=$(get_cfg LOCALE_TARGET)
-        inject_cfg() { grep -q "^$1=\"" "$BIN/claude-switch.sh.bak" && sed -i '' "s|^$1=\".*\"|$1=\"$2\"|" "$BIN/claude-switch.sh"; }
-        inject_cfg PROXY_MODE "$PM"; inject_cfg PROXY_GROUP "$PG"; inject_cfg COUNTRY_TARGET "$CT"
-        inject_cfg TZ_TARGET "$TZV"; inject_cfg LOCALE_TARGET "$LCT"
-    fi
-    chmod +x "$BIN/claude-switch.sh"
-
-    # 守护进程脚本(root 所有,用户态不可写):与远程模板比对,有差异只提示不自动改
-    APPDIR="/Library/Application Support/claude-switcher"
-    if [ -f "$APPDIR/claude-bodyguard.sh" ] || [ -f "$APPDIR/tz-watchdog.sh" ]; then
-        [ -z "$PM" ] && PM="clash-verge"
-        [ -z "$TZV" ] && TZV="America/New_York"
-        sed -e "s|__HOME__|$UHOME|g" -e "s|__PROXY_MODE__|$PM|g" "$NEW/daemons/claude-bodyguard.sh" > "$tmpd/bg.new"
-        sed -e "s|__HOME__|$UHOME|g" -e "s|__TZ_TARGET__|$TZV|g" "$NEW/daemons/tz-watchdog.sh" > "$tmpd/tz.new"
-        if ! diff -q "$tmpd/bg.new" "$APPDIR/claude-bodyguard.sh" >/dev/null 2>&1 || \
-           ! diff -q "$tmpd/tz.new" "$APPDIR/tz-watchdog.sh" >/dev/null 2>&1; then
-            echo "INFO:守护进程脚本有更新,请运行 installer/安装.command 刷新(需要密码)"
-        fi
-    fi
-    rm -rf "$tmpd"
-
-    # 更新后自检:root(旧版 LaunchDaemon)下切回真实用户执行,避免 defaults 读到 root 的配置
-    if [ "$(id -u)" -eq 0 ]; then
-        owner=$(stat -f '%Su' "$UHOME" 2>/dev/null)
-        if [ -n "$owner" ]; then out=$(sudo -H -u "$owner" "$BIN/claude-switch.sh" checkdetail 2>&1); else out=""; fi
-    else
-        out=$("$BIN/claude-switch.sh" checkdetail 2>&1)
-    fi
-    if [ -z "$out" ] || echo "$out" | grep -q '=fail'; then
-        [ -f "$BIN/claude-switch.sh.bak" ] && cp "$BIN/claude-switch.sh.bak" "$BIN/claude-switch.sh"
-        echo "FAIL:新版自检未通过,已自动回滚"
-        return 1
-    fi
-    echo "OK:更新完成 $(date '+%Y-%m-%d')"
+    echo "INFO:定制版已禁用远程覆盖更新。请fetch并审阅上游提交、测试后合入自己的分支；本机未改动。"
     return 0
+}
+
+# 按需设备信息:不修改设置,不参与启动评分。基于上游4675a35适配。
+fingerprint() {
+    python3 - "$HOME" <<'PY_DEVICE_INFO'
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+def read(command):
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+
+def clean(value):
+    return ''.join(c for c in str(value) if c.isprintable())[:300]
+
+print('设备信息：仅提供线索，不判定地区、账号风险或封禁原因；不影响启动。')
+names = set()
+pattern = re.compile(r'simsun|simhei|simkai|simfang|msyh|msjh|dengxian|wqy|fzshu|fzkai|fzhei|fangsong', re.I)
+for folder in [Path('/Library/Fonts'), Path(sys.argv[1]) / 'Library/Fonts']:
+    try:
+        for path in folder.rglob('*'):
+            if path.is_file() and path.suffix.lower() in ['.ttf', '.ttc', '.otf'] and pattern.search(path.name):
+                names.add(clean(path.name))
+    except OSError:
+        pass
+print('字体线索=info:' + ('、'.join(sorted(names)) if names else '在已扫描目录未匹配所列文件名；不代表只有系统字体'))
+try:
+    display = json.loads(read(['system_profiler', 'SPDisplaysDataType', '-json']))['SPDisplaysDataType'][0]
+    chip = display.get('sppci_model') or display.get('_name') or '未获取'
+    monitors = display.get('spdisplays_ndrvs', [])
+    resolution = (monitors[0].get('_spdisplays_resolution') or monitors[0].get('spdisplays_resolution') or '未获取') if monitors else '未获取'
+except (ValueError, KeyError, TypeError, IndexError, AttributeError):
+    chip = resolution = '未获取'
+print('GPU=info:' + clean(chip))
+print('显示=info:' + clean(resolution))
+virtual = read(['sysctl', '-n', 'kern.hv_vmm_present'])
+print('虚拟化标记=info:' + {'1': '系统报告虚拟化标记', '0': '系统未报告该标记；不证明物理机'}.get(virtual, '未获取，不能判断'))
+print('渲染器=info:本命令不读取Claude/浏览器的Canvas或WebGL，不代表浏览器指纹检查已通过。')
+PY_DEVICE_INFO
+}
+
+account_observation() {
+    python3 - "$BASE/account-observations.json" <<'PY_ACCOUNT_OBSERVATION'
+import datetime
+import json
+from pathlib import Path
+import sys
+fallback = '账号权限未验证；网络检查不代表登录或模型可用。'
+try:
+    data = json.loads(Path(sys.argv[1]).read_text())
+    records = data['observations']
+    if len(records) != 1:
+        raise ValueError('unsupported record scope')
+    record = records[0]
+    if record.get('client') != 'claude_web' or record.get('state') != 'on_hold' or record.get('source') != 'user_report':
+        raise ValueError('unverified observation')
+    day = datetime.date.fromisoformat(record['reported_on'])
+    if day > datetime.date.today():
+        raise ValueError('future date')
+    print('网页版Proton账号：用户报告on hold（' + day.isoformat() + '）；未关联桌面A/B，非实时验证。')
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    print(fallback)
+PY_ACCOUNT_OBSERVATION
 }
 
 status() {
@@ -938,21 +1086,41 @@ switch_to() {
 }
 
 case "${1:-}" in
+    network-report)
+        helper="$BASE/network-audit.py"
+        [ -f "$helper" ] || helper="$(dirname "$0")/network-audit.py"
+        exec python3 "$helper" --home "$HOME" --group "$PROXY_GROUP" --country "$COUNTRY_TARGET"
+        ;;
     check)  check ;;
+    expected-exit)
+        expected=$(expected_exit_ip 2>/dev/null) || { echo '固定出口配置无效或选择组查询失败' >&2; exit 1; }
+        [ -n "$expected" ] || { echo '未配置固定出口' >&2; exit 2; }
+        echo "$expected"
+        ;;
     checkdetail)
         OUT_FILE="$BASE/last-check.txt"
+        CHECK_OUTPUT=$(mktemp "$BASE/.check-output.XXXXXX") || { echo 'FAIL:无法创建本次扫描输出'; exit 1; }
         {
             echo "# $(date '+%F %T') pid=$$ 开始"
             checkdetail
             echo "# 结束"
-        } > "$OUT_FILE" 2>&1
-        cat "$OUT_FILE"
+        } > "$CHECK_OUTPUT" 2>&1
+        cat "$CHECK_OUTPUT"
+        mv -f "$CHECK_OUTPUT" "$OUT_FILE"
         ;;
     fix) fix ;;
+    account-note) account_observation ;;
+    protected-browser|protected-check|provider-audit|support-report)
+        helper="$BASE/protected-access.py"
+        [ -f "$helper" ] || helper="$(dirname "$0")/protected-access.py"
+        case "$1" in protected-browser) action=browser ;; protected-check) action=check ;; support-report) action=report ;; *) action=provider-audit ;; esac
+        exec python3 "$helper" "$action"
+        ;;
+    fingerprint) fingerprint ;;
     status) status ;;
     switch) switch_to "${2:-}" ;;
     set-region) set_region ;;
     update) self_update "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
-    *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|set-region|update [--auto]|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|expected-exit|network-report|fix|fingerprint|protected-browser|protected-check|provider-audit|support-report|account-note|status|switch A|B|set-region|update [--auto]|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac

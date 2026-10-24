@@ -7,9 +7,21 @@
 
 ## 你的任务
 
-帮助用户在 macOS 上安装并配置「Claude 切换器」：一个带环境安检的 Claude 账号启动/切换工具。目标状态是：**用户双击桌面图标，14 项安全检查全部通过，可以正常启动 Claude**。
+帮助用户在 macOS 上安装并配置「Claude 切换器」：一个带环境安检的 Claude 账号启动/切换工具。目标状态是：**14项检查能区分故障、待核验和个人偏好；无启动阻断项，可以正常启动Claude；不追求全部绿标**。
+
+## 2026-10-23 macOS 本地改进版优先规则
+
+本定制分支补充（2026-10-24）：`update`/`update --auto`只提示采用审阅流程，不会下载远端包覆盖定制；安装器不注册覆盖式更新任务。下文上游历史的自动更新步骤不适用于本分支。单IP锁定文件与选择组策略叠加核验；不一致阻止启动。路由模块必须核对Clash IPv6明确关闭，root模块更新须先准备可审阅构建、验证和可恢复安装脚本。
+
+以下规则优先于本文中旧版安装描述：用户后续明确要求严格模式：时区、地区格式和英文语言不符仍阻止启动；这是本地基线，不宣称为官方封禁条件。网络修复不写这些设置。按用户明确要求保留已有严格时区看门狗，并将旧版用户目录入口迁入root所有的系统目录；保留当前已设定的时区。
+
+核心配套文件增加 `core/network-audit.py`，必须与核心一起安装到 `~/.claude-switcher/`，并与保镖一起安装到root所有的 `/Library/Application Support/claude-switcher/`；自动更新只更新用户态副本，root副本仍需显式安装授权。保镖不得执行用户目录内的Python或Shell脚本。
+
+实际路由以无认证TLS探测的源端口、域名和控制器记录核验；Fake-IP/规则文本存在不能替代。仅注册保镖不能代表出口监测正常；查看近期状态及范围。守护仅终止桌面主进程，不终止浏览器和独立CLI。详见 `docs/plans/2026-10-23-checks-and-runtime-guard-design.md` 和 `docs/USAGE-SAFETY.md`。
 
 ## 开始之前：必须先确认的前置条件
+
+本机2026-10-24新增`core/protected-access.py`用户态配套模块，需与核心同时安装。它提供专用Edge固定代理入口和Chicago/en-US严格预检，读取私有出口策略；不装入root守护目录、不读取登录态。`status`保持原协议，账号观察单独调用`account-note`；具体范围见`docs/USAGE-SAFETY.md`。迁移时不复制浏览器资料或账号观察文件。
 
 逐项检查，缺哪项就先补哪项：
 
@@ -35,7 +47,7 @@
    图标用 `assets/icon-2048.png` 经 sips 生成 iconset 再 `iconutil -c icns` 打进 `Contents/Resources/AppIcon.icns`，`Info.plist` 声明 `CFBundleIconFile`，最后 `codesign --force --deep -s -`
 7. Clash Verge 模式下把置顶规则写入「全局扩展配置」(Merge.yaml) 并重启 Clash Verge；其他客户端提示用户自行添加 DOMAIN-SUFFIX 置顶规则
 8. 时区与 IPv6（已是目标值则跳过对应命令）：`systemsetup -settimezone <TZ_TARGET>`、`networksetup -setv6off Wi-Fi`（需管理员）
-9. 收尾自检：运行 `~/.local/bin/claude-switch.sh checkdetail` 确认各项状态
+9. 收尾自检：运行 `~/.local/bin/claude-switch.sh checkdetail` 确认故障项已排除，信息与待核验项范围明确
 
 日常维护命令：`check`（静默总检）/ `checkdetail`（14 项逐项）/ `fix`（一键修复）/ `switch A|B`（切换账号）/ `set-region`（换国家节点后重锁地区目标）/ `update [--auto]`（自动更新：`--auto` 由用户态 LaunchAgent 每 12 小时调用、输出落 `~/.claude-switcher/update.log`；手动跑则直接打印。流程：拉取 main → 逐项 SHA256 校验工件（对照仓库 SHA256SUMS，不符即中止）→ 剔除 5 个配置行比对去重 → 备份 .bak → 注入配置 → 守护脚本仅比对并提示 → 自检，含任何 `=fail` 自动回滚）
 
@@ -47,8 +59,8 @@
 
 ## 验收标准（全部满足才算装完）
 
-- 终端执行 `~/.local/bin/claude-switch.sh checkdetail` 输出 14 行且全部 `=ok`
-- 双击桌面 App，界面全绿，能正常启动 Claude
+- 终端执行 `~/.local/bin/claude-switch.sh checkdetail` 输出14项，无未解决的 `=fail`；严格基线不符为 `=fail`；信息与待核验项不能当作独立验证通过
+- 双击桌面 App，界面无启动阻断项，能正常启动Claude；灰色范围说明不代表零风险
 - `launchctl print system/local.claude-bodyguard`、`system/local.tz-watchdog` 与 `gui/$(id -u)/local.claude-update` 均能查到（服务已注册）
 - `/Library/Application Support/claude-switcher/` 下两个守护脚本属 root:wheel、权限 755，当前用户不可写
 - 切换一次账号 B 再切回 A，A 的登录态完好

@@ -111,7 +111,7 @@ echo "✓ 地区自适应: 国家=$CTRY 时区=$TZV 地区格式=$LOCALE (按当
 # ---- 3. 安装文件 ----
 mkdir -p "$H/.local/bin" "$H/.claude-switcher" "$H/Library/Logs"
 cp "$REPO/core/claude-switch.sh" "$H/.local/bin/"
-cp "$REPO/core/stun-probe.py" "$H/.claude-switcher/"
+cp "$REPO/core/stun-probe.py" "$REPO/core/network-audit.py" "$REPO/core/protected-access.py" "$H/.claude-switcher/"
 chmod +x "$H/.local/bin/claude-switch.sh"
 # 写入探测到的客户端/代理组名/地区目标
 sed -i '' \
@@ -126,6 +126,7 @@ sed -i '' \
 STAGE=$(mktemp -d)
 sed -e "s|__HOME__|$H|g" -e "s|__PROXY_MODE__|$MODE|g" \
     "$REPO/daemons/claude-bodyguard.sh" > "$STAGE/claude-bodyguard.sh"
+cp "$REPO/core/network-audit.py" "$STAGE/network-audit.py"
 sed -e "s|__HOME__|$H|g" -e "s|__TZ_TARGET__|$TZV|g" \
     "$REPO/daemons/tz-watchdog.sh" > "$STAGE/tz-watchdog.sh"
 chmod +x "$STAGE/claude-bodyguard.sh" "$STAGE/tz-watchdog.sh"
@@ -210,9 +211,9 @@ if [ -n "$DRYRUN" ]; then
 else
     # 守护脚本装入 root 所有的系统目录;同时清理旧版的 root 级自动更新(已改为用户态 LaunchAgent)
     SYSCMDS="mkdir -p '/Library/Application Support/claude-switcher';
-        cp '$STAGE/claude-bodyguard.sh' '$STAGE/tz-watchdog.sh' '/Library/Application Support/claude-switcher/';
-        chown root:wheel '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh';
-        chmod 755 '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh';
+        cp '$STAGE/claude-bodyguard.sh' '$STAGE/tz-watchdog.sh' '$STAGE/network-audit.py' '/Library/Application Support/claude-switcher/';
+        chown root:wheel '/Library/Application Support/claude-switcher/network-audit.py' '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh';
+        chmod 755 '/Library/Application Support/claude-switcher/network-audit.py' '/Library/Application Support/claude-switcher/claude-bodyguard.sh' '/Library/Application Support/claude-switcher/tz-watchdog.sh';
         cp '$H/.local/bin/local.claude-bodyguard.plist' '$H/.local/bin/local.tz-watchdog.plist' /Library/LaunchDaemons/;
         chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist /Library/LaunchDaemons/local.tz-watchdog.plist;
         chmod 644 /Library/LaunchDaemons/local.claude-bodyguard.plist /Library/LaunchDaemons/local.tz-watchdog.plist;
@@ -229,15 +230,9 @@ else
     sudo bash -c "$SYSCMDS" && echo "✓ 系统级配置完成" || echo "✗ 系统级配置被取消,可稍后重新运行安装程序"
     rm -rf "$STAGE"
 
-    # 自动更新:用户态 LaunchAgent(每12小时),不走 root,降低供应链风险
-    mkdir -p "$H/Library/LaunchAgents"
-    cp "$H/.local/bin/local.claude-update.plist" "$H/Library/LaunchAgents/local.claude-update.plist"
-    launchctl bootout "gui/$(id -u)/local.claude-update" 2>/dev/null
-    if launchctl bootstrap "gui/$(id -u)" "$H/Library/LaunchAgents/local.claude-update.plist" 2>/dev/null; then
-        echo "✓ 自动更新服务已注册(每12小时检查一次)"
-    else
-        echo "⚠️  自动更新服务注册失败,可手动保底: claude-switch.sh update"
-    fi
+    # 定制版不注册会覆盖本机代码的远程自动更新任务。
+    launchctl bootout "gui/$(id -u)/local.claude-update" 2>/dev/null || true
+    echo "ℹ️  定制版禁用远程覆盖更新；通过自己的Git分支审阅、测试和更新。"
 fi
 
 # ---- 7. 重启 Clash 使规则生效(仅 Clash Verge) ----
