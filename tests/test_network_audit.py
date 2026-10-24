@@ -143,6 +143,36 @@ class NetworkAuditTests(unittest.TestCase):
 
 
 class TLSProbeTests(unittest.TestCase):
+    def test_http_request_or_response_failure_is_a_transport_failure(self):
+        for operation in ['request', 'getresponse']:
+            with self.subTest(operation=operation):
+                client, secure = Mock(), Mock()
+                client.get.return_value = {'connections': [connection()]}
+                secure.sock.getsockname.return_value = ('127.0.0.1', 12345)
+                getattr(secure, operation).side_effect = OSError('private failure details')
+                with patch.object(audit.http.client, 'HTTPSConnection', return_value=secure):
+                    result = audit.probe(client, 7897, 'api.anthropic.com', '/v1/models', 'AI', 'Fixed-A')
+                self.assertEqual(result['state'], 'fail')
+                self.assertFalse(result['transport_ok'])
+                self.assertEqual(result['http_status'], '000')
+                self.assertEqual(result['chains'], ['Fixed-A', 'AI'])
+                self.assertNotIn('private failure details', json.dumps(result))
+                secure.close.assert_called_once()
+
+    def test_controller_failure_does_not_hide_a_completed_http_response(self):
+        client, secure = Mock(), Mock()
+        client.get.side_effect = OSError('private controller details')
+        secure.sock.getsockname.return_value = ('127.0.0.1', 12345)
+        secure.getresponse.return_value.status = 401
+        with patch.object(audit.http.client, 'HTTPSConnection', return_value=secure):
+            result = audit.probe(client, 7897, 'api.anthropic.com', '/v1/models', 'AI', 'Fixed-A')
+        self.assertEqual(result['state'], 'warn')
+        self.assertTrue(result['transport_ok'])
+        self.assertEqual(result['http_status'], '401')
+        self.assertNotIn('private controller details', json.dumps(result))
+        secure.request.assert_called_once()
+        secure.close.assert_called_once()
+
     def test_matches_own_source_port_and_host_not_an_unrelated_connection(self):
         client = Mock()
         client.get.return_value = {'connections': [connection(port=11111, chains=['DIRECT']), connection()]}
@@ -167,7 +197,10 @@ class TLSProbeTests(unittest.TestCase):
         secure.sock.getsockname.return_value = ('127.0.0.1', 12345)
         secure.getresponse.return_value.status = 403
         with patch.object(audit.http.client, 'HTTPSConnection', return_value=secure):
-            self.assertEqual(audit.probe(client, 7897, 'claude.ai', '/', 'AI', 'Fixed-A')['state'], 'warn')
+            result = audit.probe(client, 7897, 'claude.ai', '/', 'AI', 'Fixed-A')
+            self.assertEqual(result['state'], 'warn')
+            self.assertTrue(result['transport_ok'])
+            self.assertEqual(result['http_status'], '403')
             secure.connect.side_effect = OSError('private connection details')
             result = audit.probe(client, 7897, 'claude.ai', '/', 'AI', 'Fixed-A')
         self.assertEqual(result['state'], 'fail')
@@ -175,6 +208,18 @@ class TLSProbeTests(unittest.TestCase):
 
 
 class GuardDecisionTests(unittest.TestCase):
+    def test_two_http_blackholes_after_tls_trigger_the_desktop_decision(self):
+        client, secure = Mock(), Mock()
+        client.get.return_value = {'connections': [connection()]}
+        secure.sock.getsockname.return_value = ('127.0.0.1', 12345)
+        secure.getresponse.side_effect = TimeoutError('response timed out')
+        with tempfile.TemporaryDirectory() as folder, patch.object(audit.http.client, 'HTTPSConnection', return_value=secure):
+            path = Path(folder) / 'status.json'
+            for expected in [False, True]:
+                result = audit.probe(client, 7897, 'api.anthropic.com', '/v1/models', 'AI', 'Fixed-A')
+                snapshot = audit.guard_state({'state': result['state'], 'selected': 'Fixed-A'}, path)
+                self.assertEqual(snapshot['terminate_desktop'], expected)
+
     def test_consecutive_failures_persist_and_recovery_resets_them(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'status.json'

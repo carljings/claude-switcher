@@ -2,10 +2,12 @@
 """Dedicated browser entry and non-secret configuration audit. No login data access."""
 import argparse
 import http.client
+import importlib.util
 import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -16,9 +18,10 @@ PROFILE_NAME = 'Claude Protected Edge'
 
 
 def browser_command(profile, url='https://claude.ai/', port=7897):
-    return [str(EDGE), '--user-data-dir=' + str(profile), '--no-first-run',
+    return [str(EDGE), '--user-data-dir=' + str(profile), '--profile-directory=Default', '--no-first-run',
             '--no-default-browser-check', '--lang=en-US', '--proxy-server=http://127.0.0.1:' + str(port),
-            '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', url]
+            '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+            '--webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', url]
 
 
 def seed_profile(profile):
@@ -30,6 +33,54 @@ def seed_profile(profile):
                                      'dns_over_https': {'mode': 'off'},
                                      'intl': {'accept_languages': 'en-US,en', 'selected_languages': 'en-US,en'}}))
         prefs.chmod(0o600)
+
+
+def profile_baseline(profile):
+    prefs = json.loads((profile / 'Default/Preferences').read_text())
+    required = {'webrtc': {'ip_handling_policy': 'disable_non_proxied_udp'},
+                'dns_over_https': {'mode': 'off'},
+                'intl': {'accept_languages': 'en-US,en', 'selected_languages': 'en-US,en'}}
+    if not isinstance(prefs, dict) or any(not isinstance(prefs.get(group), dict) or prefs[group].get(key) != value
+           for group, settings in required.items() for key, value in settings.items()):
+        raise ValueError('dedicated profile baseline mismatch')
+
+
+def running_browser(profile):
+    result = subprocess.run(['/bin/ps', '-ww', '-axo', 'pid=,command='],
+                            capture_output=True, text=True, timeout=3)
+    if result.returncode or not result.stdout.strip():
+        raise ValueError('browser process state unavailable')
+    found = False
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            raise ValueError('invalid browser process state')
+        command = fields[1]
+        if not command.startswith(str(EDGE) + ' ') or str(profile) not in command:
+            continue
+        found = True
+        required = [flag for flag in browser_command(profile)[2:-1]
+                    if flag.startswith(('--profile-directory=', '--lang=', '--proxy-server=',
+                                        '--force-webrtc-ip-handling-policy=', '--webrtc-ip-handling-policy=',
+                                        '--disable-quic'))]
+        for flag in required:
+            name = flag.split('=', 1)[0]
+            values = re.findall(r'(?<!\S)' + re.escape(name) + r'(?:=[^\s]+)?(?=\s|$)', command)
+            if values != [flag]:
+                raise ValueError('dedicated browser process baseline mismatch')
+        if re.search(r'(?<!\S)--(?:proxy-bypass-list|proxy-pac-url|proxy-auto-detect|no-proxy-server)(?:=|\s|$)', command):
+            raise ValueError('dedicated browser process proxy override')
+    return found
+
+
+def load_network_audit():
+    spec = importlib.util.spec_from_file_location('claude_switcher_network_audit',
+                                                Path(__file__).with_name('network-audit.py'))
+    if spec is None or spec.loader is None:
+        raise ValueError('route module unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def preference_baseline():
@@ -93,6 +144,9 @@ def preflight(home):
     values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
     if result.returncode or values.get('ip') != identity['ip'] or values.get('loc') != identity['country']:
         raise ValueError('fixed exit mismatch')
+    routes = load_network_audit().audit(home, group=policy['group'], country=identity['country'])
+    if routes.get('state') != 'info':
+        raise ValueError('Claude target routes not verified')
     if get('/proxies/' + quote(policy['group'], safe='')).get('now') != selected['now']:
         raise ValueError('selector changed')
 
@@ -152,6 +206,7 @@ def main():
     if args.action == 'provider-audit':
         print(json.dumps(provider_audit(home), ensure_ascii=False))
         return 0
+    failure = '专用入口预检失败，未启动浏览器。请检查芝加哥时区、美国地区/英文首选语言、Clash规则/TUN、固定出口及Claude实际目标路由。'
     try:
         preflight(home)
         if args.action == 'check':
@@ -160,14 +215,25 @@ def main():
         if not EDGE.is_file():
             raise ValueError('Edge unavailable')
         profile = home / 'Library/Application Support' / PROFILE_NAME
-        seed_profile(profile)
-        subprocess.Popen(browser_command(profile), stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True, close_fds=True)
+        failure = '专用Edge运行参数未通过检查，未发起打开请求。请先正常关闭专用浏览器窗口，再重试；普通Edge无需关闭。'
+        running = running_browser(profile)
+        failure = '专用浏览器资料未通过检查，未启动。请核对专用资料的WebRTC、DoH和英文语言设置；已有资料未被覆盖。'
+        if not running:
+            seed_profile(profile)
+        profile_baseline(profile)
+        failure = '专用Edge未完成启动，请关闭专用窗口后重试。'
+        process = subprocess.Popen(browser_command(profile), stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True, close_fds=True)
+        try:
+            if process.wait(timeout=0.5) != 0 or not running_browser(profile):
+                raise ValueError('dedicated browser launch failed')
+        except subprocess.TimeoutExpired:
+            pass  # The directly launched browser is still running.
         print('已请求打开专用Edge；使用独立资料目录，请通过官方页面登录。')
         return 0
-    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException, subprocess.TimeoutExpired):
-        print('专用入口预检失败，未启动浏览器。请检查芝加哥时区、美国地区/英文首选语言、Clash规则/TUN及锁定的固定出口。', file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError, http.client.HTTPException, subprocess.TimeoutExpired):
+        print(failure, file=sys.stderr)
         return 1
 
 

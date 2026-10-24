@@ -942,16 +942,54 @@ quit_claude() {
 }
 
 archive_current() {
-    cur="$1"
+    local cur="$1"
+    local t0 staged current previous moved=0 had_old=0
     t0=$(date +%s)
-    # 归档=把当前数据目录整体移走(同卷瞬时,跨卷 mv 自动退化为复制),不再全量深拷贝
-    rm -rf "$BASE/accounts/$cur.new"
-    if mv "$DATA" "$BASE/accounts/$cur.new" 2>/dev/null; then
-        rm -rf "$BASE/accounts/$cur"
-        mv "$BASE/accounts/$cur.new" "$BASE/accounts/$cur"
+    staged="$BASE/accounts/$cur.new"
+    current="$BASE/accounts/$cur"
+    previous="$BASE/accounts/$cur.previous"
+
+    # 中断现场可能是唯一副本;新快照提交前,先保留旧快照。
+    if [ -e "$staged" ] || [ -L "$staged" ] || [ -e "$previous" ] || [ -L "$previous" ]; then
+        log "FAIL:账号$cur 存在待恢复快照，拒绝覆盖"
+        return 1
+    fi
+    if mv "$DATA" "$staged" 2>/dev/null; then
+        moved=1
     else
-        rm -rf "$BASE/accounts/$cur.tmp"
-        copy_tree "$DATA" "$BASE/accounts/$cur.tmp" && rm -rf "$BASE/accounts/$cur" && mv "$BASE/accounts/$cur.tmp" "$BASE/accounts/$cur"
+        # 跨卷移动失败可能已留下不完整目标,保留现场而不覆盖。
+        if [ -e "$staged" ] || [ -L "$staged" ]; then
+            log "FAIL:账号$cur 归档移动不完整，保留现场"
+            return 1
+        fi
+        if ! copy_tree "$DATA" "$staged"; then
+            log "FAIL:账号$cur 归档复制失败，保留现场"
+            return 1
+        fi
+    fi
+
+    if [ -e "$current" ] || [ -L "$current" ]; then
+        if ! mv "$current" "$previous"; then
+            if [ "$moved" -eq 1 ]; then
+                mv "$staged" "$DATA" || log "WARN:账号$cur 数据保留在暂存位置"
+            fi
+            log "FAIL:账号$cur 旧快照无法安全转存"
+            return 1
+        fi
+        had_old=1
+    fi
+    if ! mv "$staged" "$current"; then
+        if [ "$had_old" -eq 1 ]; then
+            mv "$previous" "$current" || log "WARN:账号$cur 旧快照保留在恢复位置"
+        fi
+        if [ "$moved" -eq 1 ]; then
+            mv "$staged" "$DATA" || log "WARN:账号$cur 当前数据保留在暂存位置"
+        fi
+        log "FAIL:账号$cur 归档提交失败"
+        return 1
+    fi
+    if [ "$had_old" -eq 1 ]; then
+        rm -rf "$previous" || log "WARN:账号$cur 旧快照副本需手动清理"
     fi
     log "已存档账号$cur ($(( $(date +%s) - t0 ))s)"
 }
@@ -970,15 +1008,40 @@ switch_to() {
     target="$1"
     case "$target" in A|B) ;; *) echo "FAIL:账号必须为A或B"; return 2 ;; esac
     check || return 1
+    if [ -L "$BASE/current" ] || { [ -e "$BASE/current" ] && [ ! -f "$BASE/current" ]; }; then
+        echo "FAIL:当前账号记录类型无效，已停止切换"
+        return 1
+    fi
     cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
+    case "$cur" in A|B|none) ;; *) echo "FAIL:当前账号记录无效，已停止切换"; return 1 ;; esac
     just_archived=0
+    if [ -e "$BASE/current.new" ] || [ -L "$BASE/current.new" ]; then
+        echo "FAIL:存在待恢复的账号提交记录，已停止切换"
+        return 1
+    fi
+    if [ -e "$DATA.new" ] || [ -L "$DATA.new" ]; then
+        echo "FAIL:存在待恢复的账号载入暂存，已停止切换"
+        return 1
+    fi
+    for recovery in "$BASE/accounts/A.new" "$BASE/accounts/A.previous" "$BASE/accounts/A.tmp" \
+                    "$BASE/accounts/B.new" "$BASE/accounts/B.previous" "$BASE/accounts/B.tmp"; do
+        if [ -e "$recovery" ] || [ -L "$recovery" ]; then
+            echo "FAIL:存在待恢复账号快照，已停止切换"
+            return 1
+        fi
+    done
+
+    # 先准备账号记录;中断或提交失败时保留它,禁止再按旧身份打开或归档。
+    if [ "$cur" != "$target" ]; then
+        (set -C; printf '%s\n' "$target" > "$BASE/current.new") || { echo "FAIL:无法准备账号提交记录，已停止切换；如有残留须先恢复"; return 1; }
+    fi
 
     # 首次运行:把当前登录中的状态收编为账号A
     if [ "$cur" = "none" ] && [ -d "$DATA" ] && [ -n "$(ls -A "$DATA" 2>/dev/null)" ]; then
-        quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
-        archive_current A
+        quit_claude || { echo "FAIL:Claude 未能退出；账号提交记录已保留，恢复前不能再次切换"; return 1; }
+        archive_current A || { echo "FAIL:首次账号归档失败；账号提交记录已保留，恢复前不能再次切换"; return 1; }
         just_archived=1
-        cur="A"; echo "$cur" > "$BASE/current"
+        cur="A"
         log "首次运行:当前登录状态已收编为账号A"
         echo "NOTE:已将当前登录收编为账号A"
     fi
@@ -986,28 +1049,33 @@ switch_to() {
     if [ "$cur" = "$target" ]; then
         # 归档是移动语义,首次收编后需把当前账号还原回 DATA
         if [ "$just_archived" = "1" ] && [ ! -d "$DATA" ] && [ -d "$BASE/accounts/$target" ]; then
-            copy_tree "$BASE/accounts/$target" "$DATA"
+            copy_tree "$BASE/accounts/$target" "$DATA.new" || { echo "FAIL:首次账号还原失败，快照和暂存已保留；恢复前不能再次切换或启动"; return 1; }
+            mv "$DATA.new" "$DATA" || { echo "FAIL:首次账号还原失败，快照和暂存已保留；恢复前不能再次切换或启动"; return 1; }
+        fi
+        if [ "$just_archived" = "1" ]; then
+            mv "$BASE/current.new" "$BASE/current" || { echo "FAIL:当前账号记录提交失败，恢复标记已保留；恢复前不能再次切换或启动"; return 1; }
         fi
         open -a "Claude" || { echo "FAIL:未能打开Claude，请检查应用安装后重新扫描重试"; return 1; }
         echo "INFO:当前已是账号$target"
         return 0
     fi
 
-    quit_claude || { echo "FAIL:Claude 未能退出，请手动退出后重试"; return 1; }
+    quit_claude || { echo "FAIL:Claude 未能退出；账号提交记录已保留，恢复前不能再次切换"; return 1; }
 
-    [ "$just_archived" = "0" ] && [ "$cur" != "none" ] && [ -d "$DATA" ] && archive_current "$cur"
+    if [ "$just_archived" = "0" ] && [ "$cur" != "none" ] && [ -d "$DATA" ]; then
+        archive_current "$cur" || { echo "FAIL:账号$cur 归档失败；账号提交记录已保留，恢复前不能再次切换"; return 1; }
+    fi
 
-    rm -rf "$DATA.new"
     t0=$(date +%s)
     if [ -d "$BASE/accounts/$target" ]; then
-        copy_tree "$BASE/accounts/$target" "$DATA.new"
+        copy_tree "$BASE/accounts/$target" "$DATA.new" || { echo "FAIL:账号$target 载入失败，快照和暂存已保留；恢复前不能再次切换或启动"; return 1; }
         log "已载入账号$target 存档 ($(( $(date +%s) - t0 ))s)"
     else
-        mkdir -p "$DATA.new"
+        mkdir -p "$DATA.new" || { echo "FAIL:无法创建账号$target 资料；账号提交记录已保留，恢复前不能再次切换"; return 1; }
         log "账号$target 无存档，将以全新状态初始化"
     fi
-    rm -rf "$DATA" && mv "$DATA.new" "$DATA"
-    echo "$target" > "$BASE/current"
+    rm -rf "$DATA" && mv "$DATA.new" "$DATA" || { echo "FAIL:账号资料替换失败，快照和暂存已保留；恢复前不能再次切换或启动"; return 1; }
+    mv "$BASE/current.new" "$BASE/current" || { echo "FAIL:当前账号记录提交失败，恢复标记已保留；恢复前不能再次切换或启动"; return 1; }
 
     open -a "Claude" || { echo "FAIL:已切换到账号${target}，但未能打开Claude；请重新扫描后打开当前档案"; return 1; }
     log "已切换到账号$target 并启动 ($(( $(date +%s) - t0 ))s)"

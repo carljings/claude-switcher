@@ -72,27 +72,29 @@ def probe(controller, port, host, path, group, selected):
     connection.set_tunnel(host, 443)
     try:
         connection.connect()
-        result['transport_ok'] = True
         source_port = str(connection.sock.getsockname()[1])
         # Read while our own TLS tunnel is open, matching host AND local source port.
-        connections = controller.get('/connections')['connections']
-        found = [c for c in connections if c.get('metadata', {}).get('host') == host
-                 and str(c.get('metadata', {}).get('sourcePort')) == source_port]
-        if len(found) != 1:
-            result.update(state='warn', detail='探测连接未能在控制器中唯一核对')
-        else:
-            item = found[0]
-            result.update(state='ok' if matches_exit(item, group, selected) else 'fail',
-                          detail='探测连接已核对' if matches_exit(item, group, selected) else '探测连接未经过所选出口',
-                          chains=[public_text(n) for n in item.get('chains', [])],
-                          rule=public_text(item.get('rule', '')),
-                          rule_payload=public_text(item.get('rulePayload', '')))
+        try:
+            connections = controller.get('/connections')['connections']
+            found = [c for c in connections if c.get('metadata', {}).get('host') == host
+                     and str(c.get('metadata', {}).get('sourcePort')) == source_port]
+            if len(found) != 1:
+                result.update(state='warn', detail='探测连接未能在控制器中唯一核对')
+            else:
+                item = found[0]
+                result.update(state='ok' if matches_exit(item, group, selected) else 'fail',
+                              detail='探测连接已核对' if matches_exit(item, group, selected) else '探测连接未经过所选出口',
+                              chains=[public_text(n) for n in item.get('chains', [])],
+                              rule=public_text(item.get('rule', '')),
+                              rule_payload=public_text(item.get('rulePayload', '')))
+        except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
+            result.update(state='warn', detail='控制器路由证据读取未完成')
         connection.request('GET', path, headers={'User-Agent': 'ClaudeSwitcher-NetworkAudit/1',
                                                 'Connection': 'close'})
         result['http_status'] = str(connection.getresponse().status)
+        result['transport_ok'] = True
     except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
-        if result['state'] != 'fail':
-            result.update(state='warn', detail='连接或控制器证据读取未完成')
+        result.update(state='fail', transport_ok=False, detail='目标TLS或HTTP传输失败')
     finally:
         connection.close()
     return result

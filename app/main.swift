@@ -125,7 +125,7 @@ final class VM: ObservableObject {
         guard canRescan else { return }
         isOpeningProtected = true
         protectedMessage = "正在核对固定出口…"
-        run(["protected-browser"], timeout: 35) { output in
+        run(["protected-browser"], timeout: 60) { output in
             self.protectedMessage = output.isEmpty ? "未取得启动结果，请检查专用入口。" : output
             self.isOpeningProtected = false
         }
