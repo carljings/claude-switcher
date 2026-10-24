@@ -20,11 +20,26 @@ import SwiftUI
             try String(contentsOfFile: root + "/commands").split(separator: "\n").map(String.init)
         }
         var passed: [String] = []
+        let suiteName = "switcher-email-fixture-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suiteName)!
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        try AccountEmailLabels.save(a: " a.user@example.com ", b: "", store: preferences)
+        assert(preferences.string(forKey: AccountEmailLabels.keyA) == "a.user@example.com")
+        assert(preferences.string(forKey: AccountEmailLabels.keyB) == "")
+        passed.append("email labels trim and persist only in isolated preferences")
+        do {
+            try AccountEmailLabels.save(a: "new@example.com", b: "invalid-address", store: preferences)
+            fatalError("Invalid email accepted")
+        } catch {
+            assert(preferences.string(forKey: AccountEmailLabels.keyA) == "a.user@example.com")
+        }
+        passed.append("invalid email rejects save without partial changes")
         vm.refresh()
         vm.refresh()
         await waitUntil { !vm.isScanning }
         await waitUntil { vm.accountNote == "Account permission not verified" }
         assert(vm.phase == .ready && vm.current == "A" && vm.selectedAccount == "A")
+        assert(vm.hasA && !vm.hasB)
         passed.append("initial selection follows current profile")
         let beforeSelection = try commands()
         vm.selectAccount("B")
@@ -46,6 +61,16 @@ import SwiftUI
         let afterBlockedConfirm = try commands()
         assert(afterBlockedConfirm == beforeSelection)
         passed.append("failed checks and busy scan block confirmation")
+        vm.isEditingEmails = true
+        vm.selectAccount("A")
+        vm.confirmOpen()
+        vm.refresh()
+        vm.openProtectedBrowser()
+        assert(vm.selectedAccount == "B" && !vm.canConfirmOpen && !vm.canRescan)
+        let afterEmailEdit = try commands()
+        assert(afterEmailEdit == beforeSelection)
+        vm.isEditingEmails = false
+        passed.append("email editing cannot launch or change a profile")
 
         for mode in ["failure", "empty", "nonzero-success"] {
             try write("mode", mode)

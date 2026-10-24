@@ -46,6 +46,21 @@ extension EnvironmentValues {
     }
 }
 
+enum AccountEmailLabels {
+    static let keyA = "accountEmailA"
+    static let keyB = "accountEmailB"
+    static func save(a: String, b: String, store: UserDefaults = .standard) throws {
+        let values = [a, b].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for (index, email) in values.enumerated() where !email.isEmpty {
+            if email.count > 254 || email.range(of: #"^[^\s@]+@[^\s@]+\.[^\s@]+$"#, options: .regularExpression) == nil {
+                throw NSError(domain: "AccountEmailLabels", code: 1, userInfo: [NSLocalizedDescriptionKey: "账号 \(index == 0 ? "A" : "B") 的邮箱格式不正确。"])
+            }
+        }
+        store.set(values[0], forKey: keyA)
+        store.set(values[1], forKey: keyB)
+    }
+}
+
 final class VM: ObservableObject {
     @Published var rows: [CheckRow] = [
         CheckRow(name: "代理内核", icon: "cpu"),
@@ -61,11 +76,12 @@ final class VM: ObservableObject {
         CheckRow(name: "探测路由", icon: "list.number"),
         CheckRow(name: "客户端语言", icon: "abc"),
         CheckRow(name: "ASN 属性", icon: "building.columns"),
-        CheckRow(name: "生态可达性", icon: "antenna.radiowaves.left.and.right"),
+        CheckRow(name: "服务响应", icon: "antenna.radiowaves.left.and.right"),
     ]
     @Published var phase: Phase = .checking
     @Published var current = "?"
     @Published private(set) var selectedAccount = ""
+    @Published var hasA = false
     @Published var hasB = false
     @Published var banner = ""
     @Published var note = ""
@@ -76,10 +92,11 @@ final class VM: ObservableObject {
     @Published var accountNote = "账号权限未验证；网络检查不代表登录或模型可用。"
     @Published var protectedMessage = ""
     @Published var isOpeningProtected = false
+    @Published var isEditingEmails = false
 
     let core: String
     init(core: String = NSHomeDirectory() + "/.local/bin/claude-switch.sh") { self.core = core }
-    var canRescan: Bool { !isScanning && !isFingerprinting && !isOpeningProtected && phase != .switching && phase != .fixing }
+    var canRescan: Bool { !isScanning && !isFingerprinting && !isOpeningProtected && !isEditingEmails && phase != .switching && phase != .fixing }
     var canConfirmOpen: Bool {
         phase == .ready && canRescan && ["A", "B"].contains(selectedAccount)
             && rows.allSatisfy { $0.state != .pending && $0.state != .fail }
@@ -88,7 +105,7 @@ final class VM: ObservableObject {
         guard ["A", "B"].contains(selectedAccount) else { return "选择一个账号后，再确认打开。" }
         if selectedAccount == current { return "确认后将复检环境，并打开当前账号 \(selectedAccount)。" }
         return "确认后将退出 Claude，切换到账号 \(selectedAccount) 并打开。"
-            + (selectedAccount == "B" && !hasB ? "首次使用需在 Claude 中登录。" : "")
+            + ((selectedAccount == "A" ? !hasA : !hasB) ? "首次使用需在 Claude 中登录。" : "")
     }
 
     func selectAccount(_ target: String) {
@@ -99,6 +116,7 @@ final class VM: ObservableObject {
     private func applyAccountStatus(_ output: String) {
         let fields = output.split(whereSeparator: \.isWhitespace).map(String.init)
         current = fields.contains("current=B") ? "B" : (fields.contains("current=A") ? "A" : "未初始化")
+        hasA = fields.contains("hasA=1")
         hasB = fields.contains("hasB=1")
         if selectedAccount.isEmpty { selectedAccount = ["A", "B"].contains(current) ? current : "A" }
     }
@@ -185,7 +203,7 @@ final class VM: ObservableObject {
                 "IP一致": "IP 与上次一致", "时区": "时区（严格）", "地区": "地区格式（严格）",
                 "IPv6": "IPv6 关闭", "DNS": "DNS 映射", "WebRTC": "WebRTC",
                 "保镖": "桌面进程监测", "规则置顶": "探测路由",
-                "客户端语言": "客户端语言", "ASN属性": "ASN 属性", "生态可达性": "生态可达性",
+                "客户端语言": "客户端语言", "ASN属性": "ASN 属性", "生态可达性": "服务响应",
             ]
             for line in out.split(separator: "\n") {
                 let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
@@ -276,7 +294,12 @@ struct ContentView: View {
     @State private var selectedCheck: CheckRow?
     @State private var showFingerprint = false
     @State private var showAccountNote = false
+    @State private var editedEmailA = ""
+    @State private var editedEmailB = ""
+    @State private var emailError = ""
     @AppStorage(AppTheme.storageKey) private var storedTheme = AppTheme.black.rawValue
+    @AppStorage(AccountEmailLabels.keyA) private var emailA = ""
+    @AppStorage(AccountEmailLabels.keyB) private var emailB = ""
     private var theme: AppTheme { AppTheme(rawValue: storedTheme) ?? .black }
 
     var body: some View {
@@ -301,6 +324,68 @@ struct ContentView: View {
         .preferredColorScheme(theme.colorScheme)
         .tint(theme.accent)
         .onAppear { vm.refresh() }
+        .sheet(isPresented: $vm.isEditingEmails) { emailEditor }
+    }
+
+    private func accountEmail(_ account: String) -> String {
+        switch account { case "A": return emailA; case "B": return emailB; default: return "" }
+    }
+
+    private var editEmailsButton: some View {
+        Button {
+            guard vm.canRescan else { return }
+            editedEmailA = emailA; editedEmailB = emailB; emailError = ""
+            vm.isEditingEmails = true
+        } label: {
+            Label("编辑邮箱", systemImage: "pencil")
+                .font(.caption).foregroundColor(theme.text)
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(theme.button).clipShape(Capsule())
+        }
+        .buttonStyle(.plain).disabled(!vm.canRescan)
+        .help("编辑A/B的本机邮箱标签，不登录或切换账号")
+    }
+
+    private var emailEditor: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("账号邮箱").font(.headline)
+            Text("邮箱用于区分本机档案，不验证当前登录或账号权限。重新登录其他账号后，请核对标签。")
+                .font(.caption).foregroundColor(theme.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("账号 A").font(.callout.bold())
+                TextField("未填写", text: $editedEmailA)
+                    .textFieldStyle(.plain).foregroundColor(theme.text).tint(theme.accent)
+                    .padding(8).background(theme.button)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border))
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("账号 B").font(.callout.bold())
+                TextField("未填写", text: $editedEmailB)
+                    .textFieldStyle(.plain).foregroundColor(theme.text).tint(theme.accent)
+                    .padding(8).background(theme.button)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.border))
+            }
+            if !emailError.isEmpty { Text(emailError).font(.caption).foregroundColor(theme.danger) }
+            Text("仅保存在这台Mac的应用偏好中；不会随源码或迁移包导出。")
+                .font(.caption2).foregroundColor(theme.secondary)
+            HStack {
+                Spacer()
+                Button("取消") { vm.isEditingEmails = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    do {
+                        try AccountEmailLabels.save(a: editedEmailA, b: editedEmailB)
+                        vm.isEditingEmails = false
+                    } catch { emailError = error.localizedDescription }
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20).frame(width: 380)
+        .foregroundColor(theme.text).background(theme.surface)
+        .preferredColorScheme(theme.colorScheme)
     }
 
     var header: some View {
@@ -470,6 +555,7 @@ struct ContentView: View {
                         .background(theme.selected).foregroundColor(theme.accent)
                         .clipShape(Capsule())
                     Spacer()
+                    editEmailsButton
                     Button { vm.openProtectedBrowser() } label: {
                         Label("专用浏览器", systemImage: "network.badge.shield.half.filled")
                             .foregroundColor(theme.text)
@@ -495,8 +581,8 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 HStack(spacing: 10) {
-                    accountButton("A", subtitle: vm.current == "A" ? "当前使用" : "已建档")
-                    accountButton("B", subtitle: vm.current == "B" ? "当前使用" : (vm.hasB ? "已建档" : "首次使用 · 需登录"))
+                    accountButton("A", subtitle: vm.current == "A" ? "当前档案" : (vm.hasA ? "已建档" : "首次使用 · 需登录"))
+                    accountButton("B", subtitle: vm.current == "B" ? "当前档案" : (vm.hasB ? "已建档" : "首次使用 · 需登录"))
                 }
                 Text(vm.accountActionHint).font(.caption).foregroundColor(theme.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -512,6 +598,7 @@ struct ContentView: View {
                 .buttonStyle(.plain).disabled(!vm.canConfirmOpen)
                 .keyboardShortcut(.return, modifiers: .command)
                 .help("复检通过后切换并请求打开所选账号（⌘↩）")
+                .accessibilityLabel("确认打开账号 \(vm.selectedAccount)，\(accountEmail(vm.selectedAccount).isEmpty ? "未填写邮箱" : accountEmail(vm.selectedAccount))")
             }
         }
         .padding(12)
@@ -528,9 +615,13 @@ struct ContentView: View {
                         .foregroundColor(vm.selectedAccount == t ? theme.accent : theme.secondary)
                     Text("账号 \(t)").font(.headline).foregroundColor(theme.text)
                 }
+                Text(accountEmail(t).isEmpty ? "未填写邮箱" : accountEmail(t))
+                    .font(.caption).foregroundColor(theme.secondary).lineLimit(1).truncationMode(.middle)
+                    .padding(.horizontal, 8)
+                    .help(accountEmail(t).isEmpty ? "点击编辑邮箱填写本机标签" : accountEmail(t))
                 Text(subtitle).font(.caption2).foregroundColor(theme.secondary)
             }
-            .frame(maxWidth: .infinity).padding(.vertical, 14)
+            .frame(maxWidth: .infinity).padding(.vertical, 10)
             .background(vm.selectedAccount == t ? theme.selected : theme.button)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(vm.selectedAccount == t ? theme.accent : theme.border, lineWidth: 1.2))
@@ -538,7 +629,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .disabled(!vm.canRescan)
         .accessibilityLabel("选择账号 \(t)")
-        .accessibilityValue((vm.selectedAccount == t ? "已选择，" : "未选择，") + subtitle)
+        .accessibilityValue((vm.selectedAccount == t ? "已选择，" : "未选择，") + accountEmail(t) + "，" + subtitle)
         .accessibilityHint("只选择账号；点击下方确认打开才会切换或启动")
     }
 
@@ -556,6 +647,7 @@ struct ContentView: View {
                 if !vm.selectedAccount.isEmpty {
                     Text("待打开账号：\(vm.selectedAccount)（选择已保留）").font(.caption).foregroundColor(theme.text)
                 }
+                editEmailsButton
                 Text(vm.phase == .openFailed ? "重新扫描后再确认打开；若仍失败，请检查 Claude 安装。" : "存在未通过项，可网络修复或手动处理后重新扫描")
                     .font(.caption).foregroundColor(theme.secondary)
                 HStack(spacing: 10) {
@@ -645,7 +737,7 @@ struct CheckDetailView: View {
         case "WebRTC": return "当前策略核验列出的4个STUN域名和UDP 3478/5349/19302拒绝规则。它可能影响使用这些端口的实时通话，未覆盖所有端口；Edge的实际表现仍需在Edge实测。"
         case "桌面进程监测": return "服务启用后约每 10 秒检查一次。Claude 桌面端未运行时待命；运行后重新扫描可查看近期核验。它仅保护桌面主进程，有检测窗口，不是系统防火墙。"
         case "ASN 属性": return "IPPure/Ping0 的截图可以佐证第三方住宅标签，不能单独证明物理住宅接入。无需为了去掉说明而伪造或更改 ASN。"
-        case "生态可达性": return "本工具不携带登录凭据，未验证账号权限。出现on hold时应在官方受限页面查看详情或请求复核；网络修复、本地通过或历史登录确认都不能解除账号限制。"
+        case "服务响应", "生态可达性": return "这项只检查Claude网页与API的匿名HTTP响应。网页403表示匿名请求被拒绝，可能需要浏览器验证；API401表示未认证。已有HTTP响应不等于账号可用，也不能据此判定封号。出现on hold时应在官方受限页面查看详情或请求复核。"
         default: return ""
         }
     }
