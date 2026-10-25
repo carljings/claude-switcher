@@ -564,13 +564,13 @@ struct ContentView: View {
                     Spacer()
                     editEmailsButton
                     Button { vm.openProtectedBrowser() } label: {
-                        Label("专用浏览器", systemImage: "network.badge.shield.half.filled")
+                        Label("专用浏览器打开cc web", systemImage: "network.badge.shield.half.filled")
                             .foregroundColor(theme.text)
                             .font(.caption).padding(.horizontal, 8).padding(.vertical, 5)
                             .background(theme.button).clipShape(Capsule())
                     }
                     .buttonStyle(.plain).disabled(!vm.canRescan)
-                    .help("独立Edge资料目录，固定本机代理；需要官方登录")
+                    .help("使用专用Edge打开Claude网页版（claude.ai），先核对固定出口；需要官方登录")
                 }
                 HStack(spacing: 10) {
                     accountButton("A", subtitle: vm.current == "A" ? "当前档案" : (vm.hasA ? "已建档" : "首次使用 · 需登录"))
