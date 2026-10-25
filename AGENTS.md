@@ -11,6 +11,12 @@
 
 ## 2026-10-23 macOS 本地改进版优先规则
 
+用户最新要求：账号状态备注已移除。App不读取或展示历史账号观察，核心不再读取`account-observations.json`；旧`account-note`命令仅返回已移除提示，不恢复此功能。保留原有`status`协议、邮箱标签及账号权限未验证的一般边界说明，已有私有文件不自动删除。
+
+App布局补充：实际签名包放`~/Applications/Claude切换器.app`，桌面同名`.app`只保留符号链接。Desktop的FileProvider可能反复添加FinderInfo导致整体strict验签失败，不能仅清属性后假称长期通过。维护须备份原桌面包、验证实际包及桌面链接；未授权仍不得部署。旧版桌面包迁移只保留到私有备份，不删除用户其他入口。
+
+2026-10-24专用链路极严补充：维护者明确保留普通浏览器/公司内网/其他开发工具。专用Edge和原生CLI改用私有`protected_listener`定义的loopback HTTP端口，直接固定具体US节点；不得回退通用7897，不全局改分流。`network-audit --protected`必须核对实际入站名称/端口、强制proxy与具体链，及同TLS连接的出口IP。隐私偏好只通过显式`protected-harden`在专用浏览器关闭后备份合并，禁止清理登录资料。CLI的TCP-only Seatbelt只约束专用入口及子进程；Edge不能套外层Seatbelt或禁用自身沙箱。root守护缺证warn也按连续故障计数。详见`docs/plans/2026-10-24-strict-dedicated-chain.md`。本节与以下旧说明冲突时优先。
+
 2026-10-24增量补强：专用入口必须复用`network-audit.py`核验Claude/API目标实际路由，缺证拒绝；每次打开核对Default偏好及同资料旧进程的必要参数，漂移不覆盖用户资料。HTTP发送/响应失败记为故障，不能因TLS握手成功降为提醒。详见`docs/plans/2026-10-24-entry-and-transport-hardening.md`。
 
 本定制分支补充（2026-10-24）：`update`/`update --auto`只提示采用审阅流程，不会下载远端包覆盖定制；安装器不注册覆盖式更新任务。下文上游历史的自动更新步骤不适用于本分支。单IP锁定文件与选择组策略叠加核验；不一致阻止启动。路由模块必须核对Clash IPv6明确关闭，root模块更新须先准备可审阅构建、验证和可恢复安装脚本。
@@ -31,7 +37,7 @@ A/B邮箱是本机应用偏好标签，不代表当前登录或权限验证；�
 
 ## 开始之前：必须先确认的前置条件
 
-本机2026-10-24新增`core/protected-access.py`用户态配套模块，需与核心同时安装。它提供专用Edge固定代理入口和Chicago/en-US严格预检，读取私有出口策略；不装入root守护目录、不读取登录态。`status`保持原协议，账号观察单独调用`account-note`；具体范围见`docs/USAGE-SAFETY.md`。迁移时不复制浏览器资料或账号观察文件。
+本机2026-10-24新增`core/protected-access.py`用户态配套模块，需与核心同时安装。它提供专用Edge固定代理入口和Chicago/en-US严格预检，读取私有出口策略；不装入root守护目录、不读取登录态。`status`保持原协议，账号观察展示与读取已按用户要求移除；具体范围见`docs/USAGE-SAFETY.md`。迁移时不复制浏览器资料或历史账号观察文件。
 
 逐项检查，缺哪项就先补哪项：
 
@@ -141,7 +147,7 @@ Linux 用户使用 `linux/` 下的 bash 版本。**开始之前必须先理解�
 **除非维护者在当次对话中明确要求，否则不得更新/部署维护者本机的已安装版本。** 具体包括：
 
 - 不得覆盖 `~/.local/bin/claude-switch.sh`、`~/.local/bin/local.claude-*.plist`
-- 不得重新编译或替换桌面 App（`~/Desktop/Claude切换器.app`）
+- 不得重新编译或替换实际 App（`~/Applications/Claude切换器.app`）及桌面入口（`~/Desktop/Claude切换器.app`）
 - 不得改动 `/Library/Application Support/claude-switcher/`、`/Library/LaunchDaemons/local.claude-*`、`~/Library/LaunchAgents/local.claude-*`
 - 不得触发本机 `update`、不得执行安装器/卸载器
 

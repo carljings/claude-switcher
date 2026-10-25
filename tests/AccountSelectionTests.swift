@@ -37,7 +37,6 @@ import SwiftUI
         vm.refresh()
         vm.refresh()
         await waitUntil { !vm.isScanning }
-        await waitUntil { vm.accountNote == "Account permission not verified" }
         assert(vm.phase == .ready && vm.current == "A" && vm.selectedAccount == "A")
         assert(vm.hasA && !vm.hasB)
         passed.append("initial selection follows current profile")
@@ -123,6 +122,8 @@ import SwiftUI
         let finalCommands = try commands()
         assert(finalCommands.filter { $0 == "switch A" }.count == 1)
         passed.append("initialization note does not hide successful open")
+        assert(!finalCommands.contains("account-note"))
+        passed.append("refresh never reads removed account state notes")
         print("ACCOUNT_SELECTION_TESTS: \(passed.count) scenarios passed; isolated fake core, no real accounts")
         for name in passed { print("PASS: " + name) }
     }

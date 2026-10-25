@@ -61,6 +61,14 @@ class BodyguardTests(unittest.TestCase):
         calls = self.calls.read_text().splitlines()
         self.assertEqual(calls, ['-f ^/Applications/Claude.app/Contents/MacOS/Claude([[:space:]]|$)'])
 
+    def test_two_missing_evidence_results_stop_only_the_desktop_main_process(self):
+        self.report.write_text(json.dumps({'state': 'warn', 'selected': 'Fixed-A'}))
+        self.assertFalse(self.run_guard()['terminate_desktop'])
+        self.assertFalse(self.calls.exists())
+        self.assertTrue(self.run_guard()['terminate_desktop'])
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         ['-f ^/Applications/Claude.app/Contents/MacOS/Claude([[:space:]]|$)'])
+
     def test_recovery_prevents_a_second_independent_failure_from_terminating(self):
         self.report.write_text(json.dumps({'state': 'fail', 'selected': 'Fixed-A'}))
         self.run_guard()

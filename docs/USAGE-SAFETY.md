@@ -1,5 +1,27 @@
 # Claude 原生账号使用与检查边界
 
+账号状态备注已按用户要求移除：界面没有此按钮或弹层，扫描不再调用旧备注命令，核心不再读取历史账号观察文件。兼容命令`account-note`只返回已移除提示；历史私有文件保留但不展示。一般性的账号权限边界说明及A/B邮箱标签仍保留，二者不等于账号状态验证。
+
+实际签名App位于`~/Applications/Claude切换器.app`，桌面同名入口为符号链接。这样避免桌面iCloud/FileProvider反复添加FinderInfo等同步元数据，使已签名包无法稳定通过strict验签。迁移保留旧包备份，不改变应用偏好域或账号目录；维护需同时核对实际包和桌面链接，打包时收实际bundle内容。
+
+## Claude专用链路极严配置（2026-10-24）
+
+专用浏览器进程显式使用英文UTF-8与Chicago环境。Edge退出时可能将界面备用语言追加到落盘`selected_languages`，校验保留英文前缀并检查尾项格式；有效`accept_languages`、强制语言和启动参数仍严格限定英文，实际HTTP与navigator/Intl另经网页复核。不会用脚本伪造navigator属性，也不会为此改普通浏览器语言。
+
+本轮用户明确限定为Claude专用链路，普通浏览器、公司内网、其他开发工具及服务器不改为全局美国出口。设计见[专用链路方案](plans/2026-10-24-strict-dedicated-chain.md)，资料与采用理由见[增量来源](RESEARCH-2026-10-24-STRICT-CHAIN.md)及[微信公众号核对](RESEARCH-2026-10-24-WECHAT.md)。
+
+私有`exit-policy.json`可增加`protected_listener`对象，例如`{"name":"Claude-Protected-HTTP","port":17897,"proxy":"Fixed-US"}`；`Fixed-US`必须是`nodes`中显式标注US、与`expected-exit-ip`一致的当前具体节点。受管末尾脚本新增仅监听127.0.0.1的HTTP入口，直接绑定该节点，避免专用浏览器第三方目标继续依赖通用分流。未知同名或同端口listener不覆盖，脚本升级后必须真实重生成再验收。
+
+新版专用入口要求这项配置，核验Cloudflare、Claude网页/API的域名、源端口、入站名称/端口、loopback地址、强制代理与节点链，并在Cloudflare同一TLS连接核对固定IP/US。不把普通浏览器连接当作专用Profile证据。普通7897入口和原分流保留；缺少专用入口证据时不会回退使用它。
+
+专用Edge明确发送英文Accept-Language、禁普通扩展、关闭网络预测、默认阻断第三方Cookie；定位（含新旧权限类型）、Local Fonts API、麦克风、摄像头、传感器及后台同步默认拒绝，并核对相关站点例外。`protected-harden`只在专用浏览器关闭后备份原始Preferences，再合并这些设置；其他字段、Cookie文件和登录资料不被清理。第三方Cookie的显式Cookie/StorageAccess例外保留，因此这里只称默认阻断。拒绝Local Fonts API不等于消除全部CSS字体测量。
+
+`protected-cli /absolute/path/to/claude [原参数...]`经同一预检后使用专用端口，强制代理大小写变量、loopback绕过和Chicago/en-US UTF-8环境，并用系统TCP-only网络沙箱限制本机专用代理端口。子进程也继承，直接联网的工具可能失败；普通终端与原第三方供应商入口不受此新增限制。调用方仍需固定官方CLI路径、清理意外provider环境，并核对CLI设置中的代理是否一致。该系统沙箱接口已弃用，缺失或失败直接拒绝，不静默降级。
+
+CLI还移除意外继承的`CLAUDE_SECURESTORAGE_CONFIG_DIR`，保留调用方固定配置目录；拒绝Apple Events/LaunchServices启动沙箱外应用，因此官方CLI自动打开登录浏览器可能失败，需由用户将官方URL手动放到专用浏览器。未读取或删除钥匙串。
+
+不能把同一外层沙箱套到Edge：本机隔离实验与Edge自身沙箱冲突，会使浏览器退出；没有使用`--no-sandbox`绕过。已知Edge策略plist只作有限冲突检查，仍需查看`edge://policy`确认实际有效策略。摄像头默认拒绝也会阻止部分正常身份/年龄核验，需要用户明确调整后复核；不能把它解释为账号网络故障。桌面守护连续两次故障或缺证都会终止桌面主进程，待命/恢复清零；它仍是有巡检窗口的进程监测。
+
 ## 2026-10-24 专用入口与传输故障补强
 
 专用入口除Cloudflare固定出口外，复用`network-audit.py`核验Claude网页/API实际目标路由；失败或缺少完整证据均拒绝启动。用户态两个模块需同时安装。HTTP发送或响应失败现在判为故障，进入桌面守护既有连续失败计数；匿名401/403仍不验证账号权限。
@@ -88,7 +110,7 @@ Edge使用独立的`~/Library/Application Support/Claude Protected Edge`资料�
 
 `protected-check`只作上述预检。`provider-audit`只报告两份设置文件的端点hostname和指定凭据字段是否非空，不输出密钥，不证明运行中进程、认证来源或账号权限。`support-report`将旧扫描的状态枚举、生成/扫描时间、有限桌面守护状态及上述配置审计保存为本地权限600的JSON；不上传，不含账号凭据、Cookie、完整扫描详情或抓包。它不是实时全面检测。
 
-`account-note`与原有`status`协议分离。可选本机`account-observations.json`目前只识别单条带日期与user_report来源的网页版on_hold记录；它不关联桌面A/B，不读取账号身份，不声称实时验证，不随迁移包导出。账号权限仍应在官方受限页面核实和申请复核。
+旧账号观察功能现已停用，原有`status`协议保持不变。历史私有账号观察不读取、不展示，也不随迁移包导出。账号权限仍应在官方受限页面核实和申请复核。
 
 验证边界：真实Edge通过隔离HTTP代理请求测试；测试代理停止后请求失败且对照源仍可直连。未全面验证浏览器HTTPS、全部WebRTC/DNS、休眠唤醒或切网场景。独立CLI已验证原有启动前失联会停止，新增严格预检同样在启动前；没有停止真实Clash或测试已认证运行中的CLI会话。桌面守护仍是有限范围的进程巡检，不是系统防火墙。客户端一致性不能证明设备实际所在地或保证账号不受限。
 

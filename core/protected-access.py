@@ -1,51 +1,139 @@
 #!/usr/bin/env python3
-"""Dedicated browser entry and non-secret configuration audit. No login data access."""
+"""Dedicated browser/CLI entries and non-secret configuration audit. No login data access."""
 import argparse
+import datetime
 import http.client
 import importlib.util
-import ipaddress
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
-import socket
 import subprocess
 import sys
-from urllib.parse import quote, urlsplit
+import tempfile
+from urllib.parse import urlsplit
 
 EDGE = Path('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge')
 PROFILE_NAME = 'Claude Protected Edge'
+SANDBOX = Path('/usr/bin/sandbox-exec')
+DENIED_PERMISSIONS = ('geolocation', 'geolocation_with_options', 'local_fonts', 'media_stream_mic',
+                      'media_stream_camera', 'sensors', 'background_sync')
 
 
-def browser_command(profile, url='https://claude.ai/', port=7897):
+def browser_command(profile, url='https://claude.ai/', port=17897):
     return [str(EDGE), '--user-data-dir=' + str(profile), '--profile-directory=Default', '--no-first-run',
-            '--no-default-browser-check', '--lang=en-US', '--proxy-server=http://127.0.0.1:' + str(port),
+            '--no-default-browser-check', '--lang=en-US', '--accept-lang=en-US,en', '--disable-extensions',
+            '--proxy-server=http://127.0.0.1:' + str(port),
             '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
             '--webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', url]
+
+
+def required_preferences():
+    return {'webrtc': {'ip_handling_policy': 'disable_non_proxied_udp'},
+            'dns_over_https': {'mode': 'off'},
+            'intl': {'accept_languages': 'en-US,en', 'selected_languages': 'en-US,en'},
+            'net': {'network_prediction_options': 2},
+            'profile': {'cookie_controls_mode': 1,
+                        'default_content_setting_values': dict({key: 2 for key in DENIED_PERMISSIONS},
+                            geolocation_with_options={'approximate': 2, 'precise': 2})}}
+
+
+def merge_required(prefs, required):
+    for key, value in required.items():
+        if isinstance(value, dict):
+            if not isinstance(prefs.setdefault(key, {}), dict):
+                raise ValueError('invalid preference object')
+            merge_required(prefs[key], value)
+        else:
+            prefs[key] = value
+
+
+def hardened_preferences(prefs):
+    if not isinstance(prefs, dict):
+        raise ValueError('invalid preferences')
+    merge_required(prefs, required_preferences())
+    prefs['intl']['forced_languages'] = []
+    settings = prefs['profile'].setdefault('content_settings', {})
+    if not isinstance(settings, dict):
+        raise ValueError('invalid content settings')
+    for scope in ['exceptions', 'partitioned_exceptions']:
+        if not isinstance(settings.setdefault(scope, {}), dict):
+            raise ValueError('invalid permission exceptions')
+        for key in DENIED_PERMISSIONS:
+            settings[scope][key] = {}
+    return prefs
+
+
+def atomic_preferences(path, content):
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.protected-prefs-', delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.flush()
+            temporary.chmod(0o600)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def seed_profile(profile):
     prefs = profile / 'Default/Preferences'
     if not prefs.exists():
+        if prefs.is_symlink() or prefs.parent.is_symlink() or profile.is_symlink():
+            raise ValueError('profile symlink is not supported')
         profile.mkdir(parents=True, mode=0o700, exist_ok=True)
         prefs.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        prefs.write_text(json.dumps({'webrtc': {'ip_handling_policy': 'disable_non_proxied_udp'},
-                                     'dns_over_https': {'mode': 'off'},
-                                     'intl': {'accept_languages': 'en-US,en', 'selected_languages': 'en-US,en'}}))
-        prefs.chmod(0o600)
+        atomic_preferences(prefs, json.dumps(hardened_preferences({})).encode())
 
 
 def profile_baseline(profile):
-    prefs = json.loads((profile / 'Default/Preferences').read_text())
-    required = {'webrtc': {'ip_handling_policy': 'disable_non_proxied_udp'},
-                'dns_over_https': {'mode': 'off'},
-                'intl': {'accept_languages': 'en-US,en', 'selected_languages': 'en-US,en'}}
-    if not isinstance(prefs, dict) or any(not isinstance(prefs.get(group), dict) or prefs[group].get(key) != value
-           for group, settings in required.items() for key, value in settings.items()):
+    path = profile / 'Default/Preferences'
+    if path.is_symlink() or path.parent.is_symlink() or profile.is_symlink():
+        raise ValueError('profile symlink is not supported')
+    prefs = json.loads(path.read_text())
+    required = required_preferences()
+    # Edge persists UI fallback languages; --accept-lang pins the effective list.
+    del required['intl']['selected_languages']
+    def matches(value, required):
+        return isinstance(value, dict) and all(
+            matches(value.get(key), expected) if isinstance(expected, dict)
+            else type(value.get(key)) is type(expected) and value.get(key) == expected
+            for key, expected in required.items())
+    if not matches(prefs, required):
         raise ValueError('dedicated profile baseline mismatch')
+    selected = prefs['intl'].get('selected_languages')
+    ui_language = (r'[A-Za-z]{2,8}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?'
+                   r'(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*')
+    if not isinstance(selected, str):
+        raise ValueError('selected language baseline mismatch')
+    languages = selected.split(',')
+    if languages[:2] != ['en-US', 'en'] or any(not re.fullmatch(ui_language, lang) for lang in languages[2:]):
+        raise ValueError('selected language baseline mismatch')
+    forced = prefs['intl'].get('forced_languages', [])
+    if not isinstance(forced, list) or any(lang not in ['en-US', 'en'] for lang in forced):
+        raise ValueError('forced language baseline mismatch')
+    settings = prefs['profile'].get('content_settings', {})
+    if not isinstance(settings, dict):
+        raise ValueError('invalid content settings')
+    for scope in ['exceptions', 'partitioned_exceptions']:
+        exceptions = settings.get(scope, {})
+        if not isinstance(exceptions, dict):
+            raise ValueError('invalid permission exceptions')
+        for kind in DENIED_PERMISSIONS:
+            entries = exceptions.get(kind, {})
+            expected = required['profile']['default_content_setting_values'][kind]
+            if not isinstance(entries, dict) or any(not isinstance(entry, dict)
+                    or type(entry.get('setting')) is not type(expected) or entry['setting'] != expected
+                    for entry in entries.values()):
+                raise ValueError('permission exception baseline mismatch')
 
 
-def running_browser(profile):
+def running_browser(profile, port=17897):
     result = subprocess.run(['/bin/ps', '-ww', '-axo', 'pid=,command='],
                             capture_output=True, text=True, timeout=3)
     if result.returncode or not result.stdout.strip():
@@ -59,8 +147,9 @@ def running_browser(profile):
         if not command.startswith(str(EDGE) + ' ') or str(profile) not in command:
             continue
         found = True
-        required = [flag for flag in browser_command(profile)[2:-1]
+        required = [flag for flag in browser_command(profile, port=port)[2:-1]
                     if flag.startswith(('--profile-directory=', '--lang=', '--proxy-server=',
+                                        '--accept-lang=', '--disable-extensions',
                                         '--force-webrtc-ip-handling-policy=', '--webrtc-ip-handling-policy=',
                                         '--disable-quic'))]
         for flag in required:
@@ -68,9 +157,59 @@ def running_browser(profile):
             values = re.findall(r'(?<!\S)' + re.escape(name) + r'(?:=[^\s]+)?(?=\s|$)', command)
             if values != [flag]:
                 raise ValueError('dedicated browser process baseline mismatch')
-        if re.search(r'(?<!\S)--(?:proxy-bypass-list|proxy-pac-url|proxy-auto-detect|no-proxy-server)(?:=|\s|$)', command):
+        if re.search(r'(?<!\S)--(?:proxy-bypass-list|proxy-pac-url|proxy-auto-detect|no-proxy-server|load-extension|disable-extensions-except)(?:=|\s|$)', command):
             raise ValueError('dedicated browser process proxy override')
     return found
+
+
+def harden_profile(home, profile, port):
+    if running_browser(profile, port):
+        raise ValueError('dedicated browser is running')
+    path = profile / 'Default/Preferences'
+    if path.is_symlink() or path.parent.is_symlink() or profile.is_symlink():
+        raise ValueError('profile symlink is not supported')
+    original = path.read_bytes() if path.exists() else b'{}'
+    updated = json.dumps(hardened_preferences(json.loads(original)), ensure_ascii=False).encode()
+    backup_dir = home / '.claude-switcher/profile-preference-backups'
+    backup_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    backup = backup_dir / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + '.json')
+    with backup.open('xb') as handle:
+        backup.chmod(0o600)
+        handle.write(original)
+    profile.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if (path.read_bytes() if path.exists() else b'{}') != original or running_browser(profile, port):
+        raise ValueError('profile changed during hardening')
+    atomic_preferences(path, updated)
+    return backup
+
+
+def managed_policy_paths(home):
+    return [Path('/Library/Managed Preferences/com.microsoft.Edge.plist'),
+            Path('/Library/Managed Preferences') / home.name / 'com.microsoft.Edge.plist',
+            Path('/Library/Preferences/com.microsoft.Edge.plist'),
+            home / 'Library/Preferences/com.microsoft.Edge.plist']
+
+
+def managed_policy_baseline(home, paths=None):
+    safe_values = {'WebRtcLocalhostIpHandling': 'disable_non_proxied_udp', 'DnsOverHttpsMode': 'off',
+                   'NetworkPredictionOptions': 2, 'DefaultGeolocationSetting': 2, 'DefaultLocalFontsSetting': 2,
+                   'DefaultSensorsSetting': 2}
+    overrides = ['ProxySettings', 'ProxyMode', 'ProxyServer', 'ProxyPacUrl', 'ProxyBypassList',
+                 'WebRtcIPHandlingUrl', 'WebRtcLocalIpsAllowedUrls', 'DnsOverHttpsTemplates',
+                 'ExtensionInstallForcelist', 'ExtensionSettings', 'GeolocationAllowedForUrls',
+                 'PreciseGeolocationAllowedForUrls', 'LocalFontsAllowedForUrls',
+                 'AudioCaptureAllowedUrls', 'VideoCaptureAllowedUrls', 'ForcedLanguages']
+    for path in managed_policy_paths(home) if paths is None else paths:
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink():
+            raise ValueError('managed policy symlink is not supported')
+        values = plistlib.loads(path.read_bytes())
+        if not isinstance(values, dict) or any(key in values and values[key] != expected
+                for key, expected in safe_values.items()) or any(values.get(key) not in [None, '', [], {}]
+                for key in overrides) or values.get('DefinePreferredLanguages') not in [None, '', 'en-US', 'en-US,en']:
+            raise ValueError('managed browser policy requires review')
 
 
 def load_network_audit():
@@ -101,54 +240,33 @@ def preference_baseline():
 def preflight(home):
     preference_baseline()
     policy = json.loads((home / '.claude-switcher/exit-policy.json').read_text())
-    if policy.get('mode') != 'clash-selector':
-        raise ValueError('invalid policy')
-    address, secret = policy['controller_socket'], policy['controller_secret']
-    if not isinstance(address, str) or not address.startswith('/') or any(c in secret for c in '\r\n'):
-        raise ValueError('invalid controller')
+    listener = policy.get('protected_listener', {})
+    port = listener.get('port') if isinstance(listener, dict) else None
+    if policy.get('mode') != 'clash-selector' or type(port) is not int or not 1024 <= port < 65536:
+        raise ValueError('dedicated listener configuration is missing')
+    routes = load_network_audit().audit(home, group=policy['group'], country='US', protected=True)
+    if routes.get('state') != 'info' or routes.get('protected_port') != port:
+        raise ValueError('dedicated fixed-exit routes not verified')
+    return port
 
-    class LocalHTTP(http.client.HTTPConnection):
-        def connect(self):
-            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.settimeout(3)
-            self.sock.connect(address)
 
-    def get(path):
-        client = LocalHTTP('localhost', timeout=3)
-        try:
-            client.request('GET', path, headers={'Authorization': 'Bearer ' + secret})
-            response = client.getresponse()
-            if response.status != 200:
-                raise ValueError('controller unavailable')
-            return json.loads(response.read(2097152))
-        finally:
-            client.close()
-
-    config = get('/configs')
-    if config.get('mode') != 'rule' or config.get('tun', {}).get('enable') is not True or config.get('ipv6') is not False:
-        raise ValueError('rule/TUN baseline mismatch')
-    selected = get('/proxies/' + quote(policy['group'], safe=''))
-    if selected.get('type') != 'Selector':
-        raise ValueError('invalid selector')
-    identity = policy['nodes'][selected['now']]
-    port = config.get('mixed-port')
-    if port != 7897 or not isinstance(identity, dict):
-        raise ValueError('proxy port or identity mismatch')
-    fixed = home / '.claude-switcher/expected-exit-ip'
-    if (fixed.exists() or fixed.is_symlink()) and identity['ip'] != str(ipaddress.IPv4Address(fixed.read_text().strip())):
-        raise ValueError('dedicated entry fixed exit mismatch')
-    result = subprocess.run(['/usr/bin/curl', '-q', '--proxy', 'http://127.0.0.1:7897',
-                             '--noproxy', '', '-fsS', '--connect-timeout', '4', '--max-time', '10',
-                             'https://www.cloudflare.com/cdn-cgi/trace'],
-                            capture_output=True, text=True, timeout=13)
-    values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-    if result.returncode or values.get('ip') != identity['ip'] or values.get('loc') != identity['country']:
-        raise ValueError('fixed exit mismatch')
-    routes = load_network_audit().audit(home, group=policy['group'], country=identity['country'])
-    if routes.get('state') != 'info':
-        raise ValueError('Claude target routes not verified')
-    if get('/proxies/' + quote(policy['group'], safe='')).get('now') != selected['now']:
-        raise ValueError('selector changed')
+def launch_cli(command, port):
+    if command and command[0] == '--':
+        command = command[1:]
+    if (not command or not Path(command[0]).is_absolute() or not Path(command[0]).is_file()
+            or not os.access(command[0], os.X_OK) or not SANDBOX.is_file()
+            or not os.access(SANDBOX, os.X_OK) or type(port) is not int or not 1024 <= port < 65536):
+        raise ValueError('native CLI or network sandbox unavailable')
+    proxy = 'http://127.0.0.1:' + str(port)
+    env = dict(os.environ)
+    env.pop('CLAUDE_SECURESTORAGE_CONFIG_DIR', None)
+    for name in ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']:
+        env[name] = proxy
+    env.update(NO_PROXY='localhost,127.0.0.1,::1', no_proxy='localhost,127.0.0.1,::1',
+               TZ='America/Chicago', LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
+    policy = ('(version 1)(allow default)(deny network-outbound)(deny appleevent-send)(deny lsopen)'
+              '(allow network-outbound (remote tcp "localhost:' + str(port) + '"))')
+    os.execve(str(SANDBOX), [str(SANDBOX), '-p', policy] + command, env)
 
 
 def provider_audit(home):
@@ -165,7 +283,6 @@ def provider_audit(home):
 
 
 def support_report(home):
-    import datetime
     report = provider_audit(home)
     report['generated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     report['account_permission_verified'] = False
@@ -197,40 +314,57 @@ def support_report(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['browser', 'check', 'provider-audit', 'report'])
+    parser.add_argument('action', choices=['browser', 'check', 'harden', 'cli', 'provider-audit', 'report'])
+    parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     home = Path.home()
+    if args.command and args.action != 'cli':
+        print('此操作不接受附加参数。', file=sys.stderr)
+        return 2
     if args.action == 'report':
         print(str(support_report(home)))
         return 0
     if args.action == 'provider-audit':
         print(json.dumps(provider_audit(home), ensure_ascii=False))
         return 0
-    failure = '专用入口预检失败，未启动浏览器。请检查芝加哥时区、美国地区/英文首选语言、Clash规则/TUN、固定出口及Claude实际目标路由。'
+    failure = '专用入口预检失败，未启动。请检查Chicago/en-US严格基线、专用代理入口、固定出口及Claude实际目标路由。'
     try:
-        preflight(home)
+        port = preflight(home)
         if args.action == 'check':
             print('专用入口固定出口预检通过；未验证账号权限。')
             return 0
+        if args.action == 'cli':
+            failure = '原生CLI严格入口未能启动；不会降级为直接联网。请检查官方CLI路径及本机网络沙箱。'
+            launch_cli(args.command, port)
+            return 0
+        failure = '专用Edge受管策略需要核对，未启动或改写资料。请检查edge://policy中的代理、WebRTC、权限和强制扩展策略。'
+        managed_policy_baseline(home)
+        profile = home / 'Library/Application Support' / PROFILE_NAME
+        if args.action == 'harden':
+            failure = '专用资料加固未完成；请先正常关闭专用Edge并核对相关策略，原资料和已生成备份保留。'
+            harden_profile(home, profile, port)
+            print('专用Edge隐私设置已加固；原偏好已保存到本机私有备份，登录资料未清理。')
+            return 0
         if not EDGE.is_file():
             raise ValueError('Edge unavailable')
-        profile = home / 'Library/Application Support' / PROFILE_NAME
         failure = '专用Edge运行参数未通过检查，未发起打开请求。请先正常关闭专用浏览器窗口，再重试；普通Edge无需关闭。'
-        running = running_browser(profile)
-        failure = '专用浏览器资料未通过检查，未启动。请核对专用资料的WebRTC、DoH和英文语言设置；已有资料未被覆盖。'
+        running = running_browser(profile, port)
+        failure = '专用浏览器资料未通过检查，未启动。请先关闭专用Edge并显式执行protected-harden；已有资料未被覆盖。'
         if not running:
             seed_profile(profile)
         profile_baseline(profile)
         failure = '专用Edge未完成启动，请关闭专用窗口后重试。'
-        process = subprocess.Popen(browser_command(profile), stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(browser_command(profile, port=port), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   start_new_session=True, close_fds=True)
+                                   start_new_session=True, close_fds=True,
+                                   env=dict(os.environ, LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8',
+                                            LC_CTYPE='en_US.UTF-8', TZ='America/Chicago'))
         try:
-            if process.wait(timeout=0.5) != 0 or not running_browser(profile):
+            if process.wait(timeout=0.5) != 0 or not running_browser(profile, port):
                 raise ValueError('dedicated browser launch failed')
         except subprocess.TimeoutExpired:
             pass  # The directly launched browser is still running.
-        print('已请求打开专用Edge；使用独立资料目录，请通过官方页面登录。')
+        print('已请求打开专用Edge；使用独立资料目录和固定专用代理，请通过官方页面登录。')
         return 0
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError, http.client.HTTPException, subprocess.TimeoutExpired):
         print(failure, file=sys.stderr)

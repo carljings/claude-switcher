@@ -89,7 +89,6 @@ final class VM: ObservableObject {
     @Published var lastScanAt: Date?
     @Published var fingerprint = ""
     @Published var isFingerprinting = false
-    @Published var accountNote = "账号权限未验证；网络检查不代表登录或模型可用。"
     @Published var protectedMessage = ""
     @Published var isOpeningProtected = false
     @Published var isEditingEmails = false
@@ -224,9 +223,6 @@ final class VM: ObservableObject {
             }
             self.run(["status"]) { st in
                 self.applyAccountStatus(st)
-                self.run(["account-note"], timeout: 10) { observation in
-                    self.accountNote = observation.isEmpty ? "账号权限未验证；网络检查不代表登录或模型可用。" : observation
-                }
                 self.isScanning = false
                 self.lastScanAt = Date()
                 if matchedKeys.count < self.rows.count {
@@ -293,7 +289,6 @@ struct ContentView: View {
     @State private var showNotice = false
     @State private var selectedCheck: CheckRow?
     @State private var showFingerprint = false
-    @State private var showAccountNote = false
     @State private var editedEmailA = ""
     @State private var editedEmailB = ""
     @State private var emailError = ""
@@ -564,17 +559,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain).disabled(!vm.canRescan)
                     .help("独立Edge资料目录，固定本机代理；需要官方登录")
-                }
-                Button { showAccountNote = true } label: {
-                    Text(vm.accountNote).font(.caption2)
-                        .foregroundColor(vm.accountNote.contains("on hold") ? theme.warning : theme.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .buttonStyle(.plain)
-                .help(vm.accountNote)
-                .popover(isPresented: $showAccountNote) {
-                    CheckDetailView(row: CheckRow(name: "账号状态备注", icon: "person.crop.circle", state: .info, detail: vm.accountNote)).environment(\.appTheme, theme)
                 }
                 if !vm.protectedMessage.isEmpty {
                     Text(vm.protectedMessage).font(.caption2).foregroundColor(theme.secondary)

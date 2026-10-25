@@ -153,7 +153,7 @@ BASE="$HOME/.claude-switcher"
 LOG="$HOME/Library/Logs/claude-switch.log"
 CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
 ROUTE_MISSED=""
-case "${1:-}" in expected-exit|network-report|fingerprint|account-note|support-report|protected-check|protected-browser|provider-audit) ;; *) mkdir -p "$BASE/accounts" ;; esac
+case "${1:-}" in expected-exit|network-report|fingerprint|account-note|support-report|protected-check|protected-browser|protected-harden|protected-cli|provider-audit) ;; *) mkdir -p "$BASE/accounts" ;; esac
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
 
@@ -900,30 +900,6 @@ print('渲染器=info:本命令不读取Claude/浏览器的Canvas或WebGL，不�
 PY_DEVICE_INFO
 }
 
-account_observation() {
-    python3 - "$BASE/account-observations.json" <<'PY_ACCOUNT_OBSERVATION'
-import datetime
-import json
-from pathlib import Path
-import sys
-fallback = '账号权限未验证；网络检查不代表登录或模型可用。'
-try:
-    data = json.loads(Path(sys.argv[1]).read_text())
-    records = data['observations']
-    if len(records) != 1:
-        raise ValueError('unsupported record scope')
-    record = records[0]
-    if record.get('client') != 'claude_web' or record.get('state') != 'on_hold' or record.get('source') != 'user_report':
-        raise ValueError('unverified observation')
-    day = datetime.date.fromisoformat(record['reported_on'])
-    if day > datetime.date.today():
-        raise ValueError('future date')
-    print('网页版Proton账号：用户报告on hold（' + day.isoformat() + '）；未关联桌面A/B，非实时验证。')
-except (OSError, ValueError, KeyError, TypeError, AttributeError):
-    print(fallback)
-PY_ACCOUNT_OBSERVATION
-}
-
 status() {
     cur="none"; [ -f "$BASE/current" ] && cur=$(cat "$BASE/current")
     hasA=0; [ -d "$BASE/accounts/A" ] && hasA=1
@@ -1107,12 +1083,13 @@ case "${1:-}" in
         mv -f "$CHECK_OUTPUT" "$OUT_FILE"
         ;;
     fix) fix ;;
-    account-note) account_observation ;;
-    protected-browser|protected-check|provider-audit|support-report)
+    account-note) echo "INFO:账号状态备注已移除" ;;
+    protected-browser|protected-check|protected-harden|protected-cli|provider-audit|support-report)
         helper="$BASE/protected-access.py"
         [ -f "$helper" ] || helper="$(dirname "$0")/protected-access.py"
-        case "$1" in protected-browser) action=browser ;; protected-check) action=check ;; support-report) action=report ;; *) action=provider-audit ;; esac
-        exec python3 "$helper" "$action"
+        case "$1" in protected-browser) action=browser ;; protected-check) action=check ;; protected-harden) action=harden ;; protected-cli) action=cli ;; support-report) action=report ;; *) action=provider-audit ;; esac
+        shift
+        exec python3 "$helper" "$action" "$@"
         ;;
     fingerprint) fingerprint ;;
     status) status ;;
@@ -1120,5 +1097,5 @@ case "${1:-}" in
     set-region) set_region ;;
     update) self_update "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
-    *) echo "用法: claude-switch.sh check|checkdetail|expected-exit|network-report|fix|fingerprint|protected-browser|protected-check|provider-audit|support-report|account-note|status|switch A|B|set-region|update [--auto]|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|expected-exit|network-report|fix|fingerprint|protected-browser|protected-check|protected-harden|protected-cli|provider-audit|support-report|status|switch A|B|set-region|update [--auto]|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac

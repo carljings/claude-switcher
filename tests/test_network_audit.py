@@ -45,7 +45,7 @@ class NetworkAuditTests(unittest.TestCase):
         self.controller_patch = patch.object(audit, 'Controller', return_value=self.controller)
         self.controller_patch.start()
         self.addCleanup(self.controller_patch.stop)
-        self.probe_patch = patch.object(audit, 'probe', side_effect=lambda client, port, host, path, group, selected:
+        self.probe_patch = patch.object(audit, 'probe', side_effect=lambda client, port, host, path, group, selected, **options:
             {'host': host, 'state': 'ok', 'http_status': '401', 'transport_ok': True,
              'chains': [selected, group]})
         self.probes = self.probe_patch.start()
@@ -141,8 +141,147 @@ class NetworkAuditTests(unittest.TestCase):
         self.proxies['Entry']['dialer-proxy'] = 'Fixed-A'
         self.assertEqual(self.run_audit()['state'], 'fail')
 
+    def configure_protected_listener(self):
+        data = json.loads(self.policy.read_text())
+        data['protected_listener'] = {'name': 'Claude-Protected-HTTP', 'port': 17897, 'proxy': 'Fixed-A'}
+        self.policy.write_text(json.dumps(data))
+        (self.home / '.claude-switcher/expected-exit-ip').write_text('192.0.2.20')
+        self.proxies['Fixed-A']['type'] = 'Http'
+
+    def test_protected_listener_probes_only_its_port_and_does_not_attribute_other_profiles(self):
+        self.configure_protected_listener()
+        self.observed = [connection(process='/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+                                    chains=['DIRECT'])]
+        report = self.run_audit(protected=True)
+        self.assertEqual(report['state'], 'info')
+        self.assertEqual(report['protected_port'], 17897)
+        self.assertEqual(report['protected_listener'], 'Claude-Protected-HTTP')
+        self.assertEqual(report['protected_proxy'], 'Fixed-A')
+        self.assertEqual(report['observations'], [])
+        self.assertIn('不按浏览器资料', report['detail'])
+        self.assertEqual({item['host'] for item in report['probes']},
+                         {'claude.ai', 'api.anthropic.com', 'www.cloudflare.com'})
+        for call in self.probes.call_args_list:
+            self.assertEqual(call.args[1], 17897)
+            self.assertIsNone(call.args[4])
+            self.assertEqual(call.kwargs['inbound'], 'Claude-Protected-HTTP')
+            self.assertEqual(call.kwargs.get('expected_exit'),
+                             ('192.0.2.20', 'US') if call.args[2] == 'www.cloudflare.com' else None)
+        self.assertNotIn('SECRET', json.dumps(report))
+
+    def test_protected_listener_requires_valid_configuration_and_fixed_us_pin(self):
+        self.configure_protected_listener()
+        original = json.loads(self.policy.read_text())
+        cases = [None, {}, {'name': 'bad name', 'port': 17897, 'proxy': 'Fixed-A'},
+                 {'name': 'Claude-Protected-HTTP', 'port': 7897, 'proxy': 'Fixed-A'},
+                 {'name': 'Claude-Protected-HTTP', 'port': True, 'proxy': 'Fixed-A'},
+                 {'name': 'Claude-Protected-HTTP', 'port': 1023, 'proxy': 'Fixed-A'},
+                 {'name': 'Claude-Protected-HTTP', 'port': 65536, 'proxy': 'Fixed-A'},
+                 {'name': 'Claude-Protected-HTTP', 'port': 17897, 'proxy': 'DIRECT'},
+                 {'name': 'Claude-Protected-HTTP', 'port': 17897, 'proxy': 'AI'},
+                 {'name': 'Claude-Protected-HTTP', 'port': 17897, 'proxy': 'Other'}]
+        for listener in cases:
+            with self.subTest(listener=listener):
+                self.policy.write_text(json.dumps(dict(original, protected_listener=listener)))
+                self.assertEqual(self.run_audit(protected=True)['state'], 'fail')
+        self.policy.write_text(json.dumps(original))
+        pin = self.home / '.claude-switcher/expected-exit-ip'
+        pin.unlink()
+        self.assertEqual(self.run_audit(protected=True)['state'], 'fail')
+        pin.write_text('192.0.2.21')
+        self.assertEqual(self.run_audit(protected=True)['state'], 'fail')
+        pin.write_text('192.0.2.20')
+        original['nodes']['Fixed-A']['country'] = 'JP'
+        self.policy.write_text(json.dumps(original))
+        self.assertEqual(self.run_audit(protected=True)['state'], 'fail')
+        self.probes.assert_not_called()
+
+    def test_protected_listener_cannot_bind_a_group_or_unknown_outbound_type(self):
+        self.configure_protected_listener()
+        for kind in [None, 'Selector', 'URLTest', 'Fallback', 'LoadBalance', 'Relay', 'Direct', 'Reject']:
+            with self.subTest(kind=kind):
+                self.proxies['Fixed-A']['type'] = kind
+                self.assertEqual(self.run_audit(protected=True)['state'], 'fail')
+        self.probes.assert_not_called()
+
+    def test_protected_probe_failure_or_missing_evidence_never_passes(self):
+        self.configure_protected_listener()
+        for state in ['fail', 'warn']:
+            with self.subTest(state=state):
+                self.probes.side_effect = lambda *args, **kwargs: {
+                    'host': args[2], 'state': state, 'http_status': '200', 'transport_ok': True}
+                self.assertEqual(self.run_audit(protected=True)['state'], state)
+
 
 class TLSProbeTests(unittest.TestCase):
+    def test_protected_probe_requires_its_inbound_and_concrete_node_without_the_selection_group(self):
+        for inbound, chains, expected in [('Claude-Protected-HTTP', ['Fixed-A'], 'ok'),
+                                         ('Mixed', ['Fixed-A'], 'fail'),
+                                         (None, ['Fixed-A'], 'fail'),
+                                         ('Claude-Protected-HTTP', ['Fixed-A', 'DIRECT'], 'fail'),
+                                         ('Claude-Protected-HTTP', ['Other'], 'fail')]:
+            with self.subTest(inbound=inbound, chains=chains):
+                item = connection(chains=chains)
+                item['metadata'].update(inboundIP='127.0.0.1', inboundPort='17897', specialProxy='Fixed-A')
+                if inbound is not None:
+                    item['metadata']['inboundName'] = inbound
+                client, secure = Mock(), Mock()
+                client.get.return_value = {'connections': [item]}
+                secure.sock.getsockname.return_value = ('127.0.0.1', 12345)
+                secure.getresponse.return_value.status = 401
+                with patch.object(audit.http.client, 'HTTPSConnection', return_value=secure):
+                    result = audit.probe(client, 17897, 'api.anthropic.com', '/v1/models',
+                                         None, 'Fixed-A', inbound='Claude-Protected-HTTP')
+                self.assertEqual(result['state'], expected)
+                self.assertTrue(result['transport_ok'])
+
+    def test_protected_probe_requires_actual_port_loopback_and_forced_proxy(self):
+        cases = [{'specialProxy': None}, {'specialProxy': 'Other'},
+                 {'inboundPort': None}, {'inboundPort': '7897'},
+                 {'inboundIP': None}, {'inboundIP': '0.0.0.0'}, {'inboundIP': '::1'}]
+        for changed in cases:
+            with self.subTest(changed=changed):
+                item = connection(chains=['Fixed-A'])
+                item['metadata'].update(inboundName='Claude-Protected-HTTP', inboundIP='127.0.0.1',
+                                        inboundPort='17897', specialProxy='Fixed-A')
+                for key, value in changed.items():
+                    if value is None:
+                        item['metadata'].pop(key)
+                    else:
+                        item['metadata'][key] = value
+                client, secure = Mock(), Mock()
+                client.get.return_value = {'connections': [item]}
+                secure.sock.getsockname.return_value = ('127.0.0.1', 12345)
+                secure.getresponse.return_value.status = 401
+                with patch.object(audit.http.client, 'HTTPSConnection', return_value=secure):
+                    result = audit.probe(client, 17897, 'api.anthropic.com', '/v1/models',
+                                         None, 'Fixed-A', inbound='Claude-Protected-HTTP')
+                self.assertEqual(result['state'], 'fail')
+                self.assertTrue(result['transport_ok'])
+
+    def test_protected_trace_checks_actual_exit_on_the_same_verified_connection(self):
+        for status, raw, expected in [(200, b'ip=192.0.2.20\nloc=US\n', 'ok'),
+                                      (200, b'ip=192.0.2.21\nloc=US\n', 'fail'),
+                                      (200, b'ip=192.0.2.20\nloc=JP\n', 'fail'),
+                                      (403, b'blocked', 'fail'),
+                                      (200, b'x' * 16385, 'fail')]:
+            with self.subTest(status=status, expected=expected):
+                item = connection(host='www.cloudflare.com', chains=['Fixed-A'])
+                item['metadata'].update(inboundName='Claude-Protected-HTTP', inboundIP='127.0.0.1',
+                                        inboundPort='17897', specialProxy='Fixed-A')
+                client, secure = Mock(), Mock()
+                client.get.return_value = {'connections': [item]}
+                secure.sock.getsockname.return_value = ('127.0.0.1', 12345)
+                secure.getresponse.return_value.status = status
+                secure.getresponse.return_value.read.return_value = raw
+                with patch.object(audit.http.client, 'HTTPSConnection', return_value=secure):
+                    result = audit.probe(client, 17897, 'www.cloudflare.com', '/cdn-cgi/trace',
+                                         None, 'Fixed-A', inbound='Claude-Protected-HTTP',
+                                         expected_exit=('192.0.2.20', 'US'))
+                self.assertEqual(result['state'], expected)
+                self.assertNotIn('192.0.2.', json.dumps(result))
+                secure.close.assert_called_once()
+
     def test_http_request_or_response_failure_is_a_transport_failure(self):
         for operation in ['request', 'getresponse']:
             with self.subTest(operation=operation):
@@ -208,6 +347,20 @@ class TLSProbeTests(unittest.TestCase):
 
 
 class GuardDecisionTests(unittest.TestCase):
+    def test_missing_evidence_counts_towards_stop_and_idle_or_verified_recovery_clears_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'status.json'
+            uncertain = {'state': 'warn', 'selected': 'Fixed-A'}
+            self.assertFalse(audit.guard_state(uncertain, path)['terminate_desktop'])
+            self.assertTrue(audit.guard_state(uncertain, path)['terminate_desktop'])
+            recovered = audit.guard_state({'state': 'info', 'selected': 'Fixed-A'}, path)
+            self.assertEqual(recovered['consecutive_failures'], 0)
+            self.assertFalse(audit.guard_state(uncertain, path)['terminate_desktop'])
+            idle = audit.guard_state({'state': 'warn', 'idle': True}, path)
+            self.assertEqual(idle['state'], 'idle')
+            self.assertEqual(idle['consecutive_failures'], 0)
+            self.assertFalse(idle['terminate_desktop'])
+
     def test_two_http_blackholes_after_tls_trigger_the_desktop_decision(self):
         client, secure = Mock(), Mock()
         client.get.return_value = {'connections': [connection()]}

@@ -28,7 +28,6 @@ echo "$*" >> "$root/commands"
 case "$1" in
  checkdetail) sleep 0.1; cat "$root/rows" ;;
  status) cat "$root/status" ;;
- account-note) echo 'Account permission not verified' ;;
  fix) echo 'FIX:fixture complete' ;;
  switch)
    sleep 0.15

@@ -4,6 +4,7 @@ import argparse
 import datetime
 import hashlib
 import http.client
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -14,8 +15,31 @@ from urllib.parse import quote
 DEFAULT_SCRIPT_HASH = 'd60fb84abefb54e550bd1dead6ed16986b119d8b3890efd6f1ead9c6d151d45b'
 
 
-def render(group):
-    return Path(__file__).with_suffix('.js').read_text().replace('__PROXY_GROUP_JSON__', json.dumps(group, ensure_ascii=True)).encode()
+def render(group, listener=None):
+    return (Path(__file__).with_suffix('.js').read_text()
+            .replace('__PROXY_GROUP_JSON__', json.dumps(group, ensure_ascii=True))
+            .replace('__PROTECTED_LISTENER_JSON__', json.dumps(listener, ensure_ascii=True)).encode())
+
+
+def protected_listener(policy, base):
+    if 'protected_listener' not in policy:
+        return None
+    value = policy['protected_listener']
+    if (not isinstance(value, dict) or set(value) != {'name', 'port', 'proxy'}
+            or not isinstance(value['name'], str) or not re.fullmatch(r'[A-Za-z0-9_-]+', value['name'])
+            or type(value['port']) is not int or not 1024 <= value['port'] <= 65535
+            or not isinstance(value['proxy'], str) or value['proxy'] == policy['group']
+            or value['proxy'].upper() in ['DIRECT', 'REJECT', 'REJECT-DROP']):
+        raise ValueError('invalid protected listener')
+    nodes = policy.get('nodes')
+    if not isinstance(nodes, dict):
+        raise ValueError('invalid fixed-exit nodes')
+    node = nodes.get(value['proxy'])
+    fixed = base / 'expected-exit-ip'
+    if (not isinstance(node, dict) or node.get('country') != 'US' or not fixed.is_file()
+            or str(ipaddress.IPv4Address(node.get('ip'))) != str(ipaddress.IPv4Address(fixed.read_text().strip()))):
+        raise ValueError('protected listener is not pinned to a US node')
+    return value
 
 
 def ipv6_off(raw):
@@ -75,7 +99,8 @@ def repair(home, group):
         raise ValueError('opt-in profile guard configuration is missing')
     state_file = base / 'profile-guard-owned.json'
     owned = json.loads(state_file.read_text()) if state_file.exists() else {}
-    guard = render(group)
+    listener = protected_listener(policy, base)
+    guard = render(group, listener)
     plans = []
     sha = lambda value: hashlib.sha256(value).hexdigest()
     for name in names:
@@ -98,6 +123,8 @@ def repair(home, group):
     selected = client.request('GET', '/proxies/' + quote(group, safe=''))
     if before.get('mode') != 'rule' or before.get('tun', {}).get('enable') is not True or selected.get('type') != 'Selector' or selected.get('now') not in policy['nodes']:
         raise ValueError('rule/TUN/selector prerequisite failed')
+    if listener and (listener['proxy'] != selected['now'] or listener['port'] == before.get('mixed-port')):
+        raise ValueError('protected listener differs from the selected node or proxy port')
     changed = [(p, old, new) for p, old, new in plans if old != new]
     backup = base / 'network-repair-backups' / datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     backup.mkdir(parents=True, mode=0o700)
@@ -123,7 +150,8 @@ def repair(home, group):
         client.request('PATCH', '/configs', {'ipv6': before.get('ipv6', True)})
         raise
     return {'scripts': len(names), 'files_changed': len(changed), 'ipv6_disabled': True,
-            'previous_ipv6': before.get('ipv6'), 'profile_reload_required': bool(changed)}
+            'previous_ipv6': before.get('ipv6'), 'profile_reload_required': bool(changed),
+            'protected_listener_configured': listener is not None}
 
 
 def main():

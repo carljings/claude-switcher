@@ -139,15 +139,63 @@ cp "$REPO/daemons/local.claude-bodyguard.plist" "$REPO/daemons/local.tz-watchdog
 sed "s|__HOME__|$H|g" "$REPO/daemons/local.claude-update.plist" > "$H/.local/bin/local.claude-update.plist"
 echo "✓ 核心文件已安装"
 
-# ---- 4. 现场编译 App 到桌面 ----
-APP="$H/Desktop/Claude切换器.app"
-mkdir -p "$H/Desktop"
-pkill -x ClaudeSwitcher 2>/dev/null
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# ---- 4. 实际 App 避开桌面同步元数据,桌面保留入口 ----
+APP="$H/Applications/Claude切换器.app"
+DESKTOP_APP="$H/Desktop/Claude切换器.app"
+mkdir -p "$H/Desktop" "$H/Applications" || exit 1
+is_switcher_app() {
+    [ -d "$1" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null)" = "local.claude-switcher" ]
+}
+check_app_targets() {
+    if { [ -e "$APP" ] || [ -L "$APP" ]; } && ! is_switcher_app "$APP"; then
+        echo "✗ Applications 同名目标不是本切换器,已保留,请人工核对"
+        return 1
+    fi
+    if { [ -e "$DESKTOP_APP" ] || [ -L "$DESKTOP_APP" ]; } \
+        && { [ ! -L "$DESKTOP_APP" ] || [ "$(readlink "$DESKTOP_APP")" != "$APP" ]; } \
+        && ! is_switcher_app "$DESKTOP_APP"; then
+        echo "✗ 桌面同名入口不是本切换器,已保留,请人工核对"
+        return 1
+    fi
+}
+check_app_targets || exit 1
+APP_BUILD_ROOT=$(mktemp -d "$H/Applications/.claude-switcher-build.XXXXXX") || exit 1
+APP_BUILD="$APP_BUILD_ROOT/Claude切换器.app"
+APP_BACKUP=""
+app_saved=0; desktop_saved=0; app_installed=0; desktop_created=0; app_committed=0
+cleanup_app_install() {
+    result=$?
+    trap - EXIT
+    if [ "$app_committed" = "0" ]; then
+        if [ "$desktop_created" = "1" ] && [ -L "$DESKTOP_APP" ] && [ "$(readlink "$DESKTOP_APP")" = "$APP" ]; then
+            rm -f "$DESKTOP_APP"
+        fi
+        if [ "$app_installed" = "1" ]; then
+            mv "$APP" "$APP_BACKUP/failed.app" || echo "✗ 新包无法转存,请人工核对 Applications 与备份"
+        fi
+        if [ "$app_saved" = "1" ]; then
+            if [ ! -e "$APP" ] && [ ! -L "$APP" ]; then
+                mv "$APP_BACKUP/Applications.app" "$APP" || echo "✗ 原实际 App 恢复失败,副本保留在 $APP_BACKUP"
+            else
+                echo "✗ 实际 App 目标已变化,原包保留在 $APP_BACKUP"
+            fi
+        fi
+        if [ "$desktop_saved" = "1" ]; then
+            if [ ! -e "$DESKTOP_APP" ] && [ ! -L "$DESKTOP_APP" ]; then
+                mv "$APP_BACKUP/Desktop.app" "$DESKTOP_APP" || echo "✗ 原桌面入口恢复失败,副本保留在 $APP_BACKUP"
+            else
+                echo "✗ 桌面目标已变化,原入口保留在 $APP_BACKUP"
+            fi
+        fi
+    fi
+    rm -rf "$APP_BUILD_ROOT"
+    exit "$result"
+}
+trap cleanup_app_install EXIT
+mkdir -p "$APP_BUILD/Contents/MacOS" "$APP_BUILD/Contents/Resources" || exit 1
 # 必须带 -target,否则新 SDK 编出的二进制在老系统被拒启动
 if swiftc -O -parse-as-library -target "$(uname -m)-apple-macos13.0" \
-    "$REPO/app/main.swift" -o "$APP/Contents/MacOS/ClaudeSwitcher" \
+    "$REPO/app/main.swift" -o "$APP_BUILD/Contents/MacOS/ClaudeSwitcher" \
     -framework SwiftUI -framework AppKit; then
     echo "✓ App 编译完成"
 else
@@ -158,16 +206,16 @@ fi
 # 图标: assets/ 里有 PNG 源文件时现场生成 icns
 PNG="$REPO/assets/icon-2048.png"
 if [ -f "$PNG" ]; then
-    ICONSET="$(mktemp -d)/AppIcon.iconset"
+    ICONSET="$APP_BUILD_ROOT/AppIcon.iconset"
     mkdir -p "$ICONSET"
     for sz in 16 32 128 256 512; do
         sips -z "$sz" "$sz" "$PNG" --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null 2>&1
         sips -z $((sz*2)) $((sz*2)) "$PNG" --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null 2>&1
     done
-    iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns" 2>/dev/null \
+    iconutil -c icns "$ICONSET" -o "$APP_BUILD/Contents/Resources/AppIcon.icns" 2>/dev/null \
         && echo "✓ 图标已生成" || echo "⚠️  图标生成失败(不影响使用)"
 fi
-cat > "$APP/Contents/Info.plist" <<EOF
+cat > "$APP_BUILD/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -185,8 +233,40 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
-echo "✓ App 已放到桌面"
+if ! codesign --force --deep -s - "$APP_BUILD" >/dev/null 2>&1 \
+    || ! codesign --verify --deep --strict "$APP_BUILD" >/dev/null 2>&1; then
+    echo "✗ App 签名验证失败,停止安装。请核对实际 Applications 目录是否参与同步。"
+    exit 1
+fi
+# 构建期间目标可能变化,移动任何已有入口前重新核对。
+check_app_targets || exit 1
+mkdir -p "$H/.claude-switcher/app-backups" || exit 1
+APP_BACKUP=$(mktemp -d "$H/.claude-switcher/app-backups/install.XXXXXX") || exit 1
+pkill -x ClaudeSwitcher 2>/dev/null
+if [ -e "$APP" ] || [ -L "$APP" ]; then
+    mv "$APP" "$APP_BACKUP/Applications.app" || exit 1
+    app_saved=1
+fi
+if { [ -e "$DESKTOP_APP" ] || [ -L "$DESKTOP_APP" ]; } \
+    && { [ ! -L "$DESKTOP_APP" ] || [ "$(readlink "$DESKTOP_APP")" != "$APP" ]; }; then
+    mv "$DESKTOP_APP" "$APP_BACKUP/Desktop.app" || exit 1
+    desktop_saved=1
+fi
+[ ! -e "$APP" ] && [ ! -L "$APP" ] || { echo "✗ 实际 App 目标已变化,停止替换"; exit 1; }
+mv "$APP_BUILD" "$APP" || exit 1
+app_installed=1
+if [ ! -L "$DESKTOP_APP" ] || [ "$(readlink "$DESKTOP_APP")" != "$APP" ]; then
+    ln -s "$APP" "$DESKTOP_APP" || exit 1
+    desktop_created=1
+fi
+if ! codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
+    echo "✗ 实际 App 验签失败,恢复原包与入口"
+    exit 1
+fi
+app_committed=1
+rm -rf "$APP_BUILD_ROOT"
+trap - EXIT
+echo "✓ App 已安装到 Applications,桌面入口已就绪"
 
 # ---- 5. 写入置顶规则(仅 Clash Verge;智能合并不覆盖已有配置;其他客户端自行配置) ----
 if [ "$MODE" = "clash-verge" ]; then

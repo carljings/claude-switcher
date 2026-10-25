@@ -235,14 +235,18 @@ esac
         self.assertIn('2026-10-22', row)
         self.assertIn('未携带凭据', row)
 
-    def test_account_note_is_scoped_and_does_not_map_hold_to_desktop_accounts(self):
-        (self.base / 'account-observations.json').write_text(json.dumps({'observations': [
-            {'client': 'claude_web', 'state': 'on_hold', 'source': 'user_report', 'reported_on': '2026-10-23'}]}))
+    def test_removed_account_note_does_not_display_private_observation(self):
+        private = self.base / 'account-observations.json'
+        original = json.dumps({'observations': [
+            {'client': 'claude_web', 'state': 'on_hold', 'source': 'user_report',
+             'reported_on': '2026-10-23', 'private_marker': 'never-display-this'}]})
+        private.write_text(original)
         result = self.run_check('account-note')
-        self.assertIn('用户报告on hold', result.stdout)
-        self.assertIn('未关联桌面A/B', result.stdout)
-        self.assertNotIn('current=B', result.stdout)
-        self.assertNotIn('carljings', result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), 'INFO:账号状态备注已移除')
+        self.assertNotIn('on hold', result.stdout)
+        self.assertNotIn('never-display-this', result.stdout)
+        self.assertEqual(private.read_text(), original)
 
     def test_review_is_bound_to_one_ip(self):
         self.reviewed(ip='192.0.2.99')

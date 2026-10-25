@@ -34,7 +34,7 @@ class ProfileGuardTests(unittest.TestCase):
             'controller_secret': 'fixture-secret', 'nodes': {'Fixed': '192.0.2.20'}}))
         self.config = self.clash / 'config.yaml'
         self.config.write_bytes(b'ipv6: true\nmode: rule\n')
-        self.runtime = {'mode': 'rule', 'tun': {'enable': True}, 'ipv6': True}
+        self.runtime = {'mode': 'rule', 'tun': {'enable': True}, 'ipv6': True, 'mixed-port': 7897}
         self.calls = []
         fixture = self
         class FakeController:
@@ -49,6 +49,68 @@ class ProfileGuardTests(unittest.TestCase):
         self.controller = patch.object(guard, 'Controller', FakeController)
         self.controller.start()
         self.addCleanup(self.controller.stop)
+
+    def configure_listener(self):
+        data = json.loads(self.policy.read_text())
+        data['nodes'] = {'Fixed': {'ip': '192.0.2.20', 'country': 'US'}}
+        data['protected_listener'] = {'name': 'Claude-Protected-HTTP', 'port': 17897, 'proxy': 'Fixed'}
+        self.policy.write_text(json.dumps(data))
+        (self.base / 'expected-exit-ip').write_text('192.0.2.20\n')
+        return data
+
+    def test_listener_is_rendered_for_the_fixed_node_and_requires_profile_reload(self):
+        data = self.configure_listener()
+        result = guard.repair(self.home, 'AI')
+        self.assertEqual(self.script.read_bytes(), guard.render('AI', data['protected_listener']))
+        self.assertTrue(result['protected_listener_configured'])
+        self.assertTrue(result['profile_reload_required'])
+        self.assertNotIn('listeners', self.runtime)
+        self.assertEqual(guard.repair(self.home, 'AI')['files_changed'], 0)
+        self.assertTrue(all(payload == {'ipv6': False} for method, path, payload in self.calls if method == 'PATCH'))
+
+    def test_invalid_listener_prerequisites_never_write_files_or_controller(self):
+        valid = self.configure_listener()
+        cases = [
+            ('name', {'name': '../bad'}), ('name-type', {'name': 7}),
+            ('port-type', {'port': True}), ('privileged-port', {'port': 80}),
+            ('port-range', {'port': 65536}), ('mixed-port', {'port': 7897}),
+            ('proxy-unknown', {'proxy': 'Unknown'}), ('proxy-direct', {'proxy': 'DIRECT'}),
+            ('proxy-group', {'proxy': 'AI'}), ('proxy-other-selection', {'proxy': 'Other'}),
+        ]
+        for name, change in cases:
+            with self.subTest(case=name):
+                data = json.loads(json.dumps(valid))
+                data['nodes'].update({'Other': {'ip': '192.0.2.20', 'country': 'US'},
+                                      'DIRECT': {'ip': '192.0.2.20', 'country': 'US'},
+                                      'AI': {'ip': '192.0.2.20', 'country': 'US'}})
+                data['protected_listener'].update(change)
+                self.policy.write_text(json.dumps(data))
+                with self.assertRaises(ValueError):
+                    guard.repair(self.home, 'AI')
+                self.assertEqual(self.script.read_bytes(), self.old_script)
+                self.assertEqual(self.config.read_bytes(), b'ipv6: true\nmode: rule\n')
+                self.assertFalse(any(method == 'PATCH' for method, _, _ in self.calls))
+                self.assertFalse((self.base / 'network-repair-backups').exists())
+
+    def test_listener_requires_an_explicit_us_node_and_matching_pin(self):
+        valid = self.configure_listener()
+        for node, pin in [({'ip': '192.0.2.20', 'country': 'JP'}, '192.0.2.20'),
+                          ('192.0.2.20', '192.0.2.20'),
+                          ({'ip': '192.0.2.20', 'country': 'US'}, '192.0.2.21'),
+                          ({'ip': '192.0.2.20', 'country': 'US'}, None)]:
+            with self.subTest(node=node, pin=pin):
+                data = json.loads(json.dumps(valid))
+                data['nodes']['Fixed'] = node
+                self.policy.write_text(json.dumps(data))
+                fixed = self.base / 'expected-exit-ip'
+                if pin is None:
+                    fixed.unlink()
+                else:
+                    fixed.write_text(pin)
+                with self.assertRaises(ValueError):
+                    guard.repair(self.home, 'AI')
+                self.assertEqual(self.script.read_bytes(), self.old_script)
+                self.assertFalse(any(method == 'PATCH' for method, _, _ in self.calls))
 
     def test_installs_final_script_and_disables_current_and_persistent_ipv6(self):
         result = guard.repair(self.home, 'AI')
@@ -97,6 +159,40 @@ class ProfileGuardTests(unittest.TestCase):
 let cfg={"proxy-groups":[{name:"AI",type:"select",proxies:["Fixed"]}],rules:["MATCH,DIRECT"],dns:{nameserver:["fixture"]}};
 let first=JSON.stringify(main(cfg)); let second=JSON.stringify(main(cfg));
 if(first!==second||cfg.rules[0]!=="AND,((NETWORK,udp),(DST-PORT,3478)),REJECT"||cfg.rules.at(-1)!=="MATCH,DIRECT"||cfg.ipv6!==false||cfg.dns.ipv6!==false||cfg.dns.nameserver[0]!=="fixture"||cfg["proxy-groups"][0].proxies[0]!=="Fixed")process.exit(1);
+'''
+        subprocess.run(['node', '-e', code], check=True, capture_output=True, timeout=8)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required only for JS fixture')
+    def test_rendered_listener_is_loopback_only_and_preserves_unrelated_configuration(self):
+        listener = {'name': 'Claude-Protected-HTTP', 'port': 17897, 'proxy': 'Fixed'}
+        code = guard.render('AI', listener).decode() + '''
+const existing={name:"unrelated",type:"http",listen:"127.0.0.1",port:17898,proxy:"Other"};
+let cfg={proxies:[{name:"Fixed",type:"http"},{name:"Other",type:"http"}],"proxy-groups":[{name:"AI",type:"select",proxies:["Fixed"]}],listeners:[existing],rules:["MATCH,DIRECT"],dns:{nameserver:["fixture"]}};
+let groups=JSON.stringify(cfg["proxy-groups"]), proxies=JSON.stringify(cfg.proxies);
+let first=JSON.stringify(main(cfg)); let second=JSON.stringify(main(cfg));
+const added=cfg.listeners.find(x=>x.name==="Claude-Protected-HTTP");
+if(first!==second||cfg.listeners.length!==2||cfg.listeners[0]!==existing||added.type!=="http"||added.listen!=="127.0.0.1"||added.port!==17897||added.proxy!=="Fixed"||JSON.stringify(cfg["proxy-groups"])!==groups||JSON.stringify(cfg.proxies)!==proxies||cfg.rules.at(-1)!=="MATCH,DIRECT")process.exit(1);
+'''
+        subprocess.run(['node', '-e', code], check=True, capture_output=True, timeout=8)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required only for JS fixture')
+    def test_rendered_listener_refuses_missing_node_and_unknown_name_or_port_collisions(self):
+        listener = {'name': 'Claude-Protected-HTTP', 'port': 17897, 'proxy': 'Fixed'}
+        code = guard.render('AI', listener).decode() + '''
+const conflicts=[
+  {name:"Claude-Protected-HTTP",type:"http",listen:"0.0.0.0",port:17897,proxy:"Fixed"},
+  {name:"unknown",type:"http",listen:"127.0.0.1",port:17897,proxy:"Other"},
+  {name:"unknown",type:"http",listen:"127.0.0.1",port:"17897",proxy:"Other"},
+  {name:"Claude-Protected-HTTP",type:"http",listen:"127.0.0.1",port:17898,proxy:"Fixed"},
+];
+for(const conflict of conflicts){
+  let cfg={proxies:[{name:"Fixed",type:"http"}],"proxy-groups":[{name:"AI"}],listeners:[conflict],rules:["MATCH,DIRECT"]};
+  const before=JSON.stringify(cfg); let rejected=false;
+  try{main(cfg);}catch(e){rejected=true;}
+  if(!rejected||JSON.stringify(cfg)!==before)process.exit(1);
+}
+let cfg={proxies:[{name:"Other"}],"proxy-groups":[{name:"AI"}],rules:[]};
+let rejected=false;try{main(cfg);}catch(e){rejected=true;}if(!rejected)process.exit(1);
 '''
         subprocess.run(['node', '-e', code], check=True, capture_output=True, timeout=8)
 
