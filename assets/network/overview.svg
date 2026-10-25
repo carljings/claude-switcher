@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="1460" viewBox="0 0 2000 1460" role="img" aria-labelledby="title desc"><title id="title">本机部署示例（2026-10-25快照）：AI网络总览</title><desc id="desc">本机部署示例（2026-10-25快照），不是通用安装拓扑；真实节点与策略在私有配置中，不随源码分发。沿用旧图四列布局。专用Edge与专用原生CLI改用17897绑定当前具体美国HTTP出口；普通应用经7897或TUN按规则分流。固定出口仍通过Trojan机场前置。保留美国Shadowsocks备用和日本SOCKS5备用。VPS本机双账号为历史结构，本轮未远程核验。</desc><rect width="2000" height="1460" fill="white" /><g font-family="PingFang SC,Microsoft YaHei,sans-serif"><text x="50" y="75" text-anchor="start" font-size="41" font-weight="600" fill="#17324F">本机部署示例：AI 网络总览与固定出口</text>
+<text x="50" y="122" text-anchor="start" font-size="25" font-weight="400" fill="#60758B">2026-10-25 快照 · 脱敏示例，三节点与 VPS 不是所有用户的安装默认，也不随源码分发</text>
+<rect x="50" y="155" width="1900" height="60" rx="12" fill="#EEF6FC" stroke="none" stroke-width="2" />
+<text x="1000" y="194" text-anchor="middle" font-size="25" font-weight="400" fill="#176FA7">2026-10-25 · 机场前置当前为 Trojan · 美国①匹配单IP锁 · Chicago / en-US · 地址与凭据隐藏</text>
+<rect x="50" y="255" width="460" height="640" rx="24" fill="#F1F6FC" stroke="#CCDDEC" stroke-width="2" />
+<rect x="590" y="255" width="300" height="640" rx="24" fill="#F4F0FA" stroke="#D9CEE9" stroke-width="2" />
+<rect x="970" y="255" width="490" height="640" rx="24" fill="#F1F8F7" stroke="#CADFDB" stroke-width="2" />
+<rect x="1540" y="255" width="410" height="640" rx="24" fill="#F7F7FB" stroke="#D8DAE6" stroke-width="2" />
+<text x="75" y="301" text-anchor="start" font-size="29" font-weight="600" fill="#17324F">01  本地 Mac</text>
+<text x="615" y="301" text-anchor="start" font-size="29" font-weight="600" fill="#17324F">02  机场中转</text>
+<text x="995" y="301" text-anchor="start" font-size="29" font-weight="600" fill="#17324F">03  固定出口</text>
+<text x="1565" y="301" text-anchor="start" font-size="29" font-weight="600" fill="#17324F">04  目标服务</text>
+<rect x="75" y="340" width="410" height="140" rx="18" fill="white" stroke="#D2DFEB" stroke-width="2" />
+<text x="100" y="381" text-anchor="start" font-size="25" font-weight="600" fill="#17324F">专用 Edge / 专用原生 CLI</text>
+<text x="100" y="425" text-anchor="start" font-size="23" font-weight="400" fill="#176FA7">17897 · 固定具体 HTTP 节点</text>
+<text x="100" y="461" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">先核对基线、IP锁与实际路由</text>
+<rect x="75" y="505" width="410" height="125" rx="18" fill="white" stroke="#D2DFEB" stroke-width="2" />
+<text x="100" y="547" text-anchor="start" font-size="25" font-weight="600" fill="#17324F">桌面 / OpenAI / 检测域名</text>
+<text x="100" y="596" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">通用入口 · 由前置规则分流</text>
+<rect x="75" y="690" width="410" height="150" rx="18" fill="white" stroke="#AACCE3" stroke-width="2" />
+<text x="100" y="737" text-anchor="start" font-size="31" font-weight="600" fill="#17324F">Clash / Mihomo</text>
+<text x="100" y="784" text-anchor="start" font-size="22" font-weight="400" fill="#176FA7">专用 :17897 + 通用 :7897 / TUN</text>
+<text x="100" y="821" text-anchor="start" font-size="21" font-weight="400" fill="#60758B">Rule / gVisor · 内核 IPv6 关闭</text>
+<polyline points="75,410 60,410 60,765 75,765" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="75.0,765.0 63.0,759.0 63.0,771.0" fill="#176FA7" />
+<polyline points="280,630 280,690" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="280.0,690.0 286.0,678.0 274.0,678.0" fill="#176FA7" />
+<text x="615" y="365" text-anchor="start" font-size="25" font-weight="600" fill="#7157A6">当前机场订阅</text>
+<text x="615" y="412" text-anchor="start" font-size="22" font-weight="400" fill="#17324F">所选节点协议：Trojan</text>
+<text x="615" y="464" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">机场负责前一跳</text>
+<rect x="615" y="610" width="250" height="230" rx="18" fill="white" stroke="#CBBCE0" stroke-width="2" />
+<text x="740" y="657" text-anchor="middle" font-size="26" font-weight="600" fill="#7157A6">当前所选节点</text>
+<text x="740" y="703" text-anchor="middle" font-size="21" font-weight="400" fill="#17324F">dialer-proxy 前置</text>
+<text x="740" y="750" text-anchor="middle" font-size="22" font-weight="400" fill="#60758B">影响传输链路</text>
+<text x="740" y="808" text-anchor="middle" font-size="20" font-weight="400" fill="#60758B">不决定最终美国地址</text>
+<polyline points="485,765 615,765" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="615.0,765.0 603.0,759.0 603.0,771.0" fill="#176FA7" />
+<text x="550" y="742" text-anchor="middle" font-size="20" font-weight="400" fill="#176FA7">中转</text>
+<text x="995" y="360" text-anchor="start" font-size="29" font-weight="600" fill="#23754F">AI-固定IP 保留三个选项</text>
+<text x="995" y="405" text-anchor="start" font-size="24" font-weight="400" fill="#60758B">当前专用入口仅绑定美国①</text>
+<rect x="995" y="435" width="440" height="365" rx="18" fill="white" stroke="#AACFC7" stroke-width="2" />
+<text x="1215" y="477" text-anchor="middle" font-size="23" font-weight="600" fill="#23754F">单IP锁匹配后才允许专用启动</text>
+<rect x="1015" y="500" width="400" height="90" rx="10" fill="#176FA7" stroke="none" stroke-width="2" />
+<text x="1035" y="531" text-anchor="start" font-size="22" font-weight="600" fill="white">美国① · HTTP CONNECT</text>
+<text x="1035" y="562" text-anchor="start" font-size="21" font-weight="400" fill="white">当前固定出口 · IP锁匹配</text>
+<rect x="1015" y="610" width="400" height="80" rx="10" fill="#EDF4FA" stroke="none" stroke-width="2" />
+<text x="1035" y="641" text-anchor="start" font-size="22" font-weight="600" fill="#176FA7">美国② · Shadowsocks 2022</text>
+<text x="1035" y="672" text-anchor="start" font-size="21" font-weight="400" fill="#176FA7">既有 VPS 代理 · 备用</text>
+<rect x="1015" y="710" width="400" height="80" rx="10" fill="#EDF4FA" stroke="none" stroke-width="2" />
+<text x="1035" y="741" text-anchor="start" font-size="22" font-weight="600" fill="#176FA7">日本 · SOCKS5</text>
+<text x="1035" y="772" text-anchor="start" font-size="21" font-weight="400" fill="#176FA7">保留备用，当前未选中</text>
+<text x="995" y="839" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">改选其他节点需重核 IP锁 / 国家</text>
+<text x="995" y="873" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">不等于可直接沿用当前严格许可</text>
+<polyline points="865,765 930,765 930,545 1015,545" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1015.0,545.0 1003.0,539.0 1003.0,551.0" fill="#176FA7" />
+<text x="930" y="740" text-anchor="middle" font-size="19" font-weight="400" fill="#176FA7">连接</text>
+<text x="1565" y="365" text-anchor="start" font-size="28" font-weight="600" fill="#176FA7">Claude / OpenAI</text>
+<text x="1565" y="412" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">IPPure / Ping0 / 检测接口</text>
+<text x="1565" y="459" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">专用实例访问的其他目标</text>
+<rect x="1565" y="610" width="360" height="230" rx="18" fill="white" stroke="#D5D6E4" stroke-width="2" />
+<text x="1745" y="657" text-anchor="middle" font-size="25" font-weight="600" fill="#17324F">由固定美国出口访问</text>
+<text x="1745" y="703" text-anchor="middle" font-size="22" font-weight="400" fill="#60758B">HTTPS 按服务自身认证</text>
+<text x="1745" y="750" text-anchor="middle" font-size="22" font-weight="400" fill="#176FA7">三目标匿名路由已核对</text>
+<text x="1745" y="808" text-anchor="middle" font-size="23" font-weight="400" fill="#60758B">本机通过 ≠ 账号权限</text>
+<polyline points="1415,545 1500,545 1500,765 1565,765" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1565.0,765.0 1553.0,759.0 1553.0,771.0" fill="#176FA7" />
+<text x="1500" y="742" text-anchor="middle" font-size="19" font-weight="400" fill="#176FA7">HTTPS</text>
+<rect x="50" y="950" width="1900" height="315" rx="24" fill="#F6F8FB" stroke="#D8E0E8" stroke-width="2" />
+<text x="80" y="1000" text-anchor="start" font-size="29" font-weight="600" fill="#17324F">既有 VPS：美国②代理出口 + 本机 Claude Code 双账号（历史结构）</text>
+<rect x="80" y="1050" width="580" height="135" rx="18" fill="white" stroke="#CBD8E3" stroke-width="2" />
+<rect x="760" y="1050" width="500" height="135" rx="18" fill="white" stroke="#CBD8E3" stroke-width="2" />
+<rect x="1370" y="1050" width="550" height="135" rx="18" fill="white" stroke="#CBD8E3" stroke-width="2" />
+<text x="105" y="1091" text-anchor="start" font-size="27" font-weight="600" fill="#17324F">VPS 本机 Claude Code CLI</text>
+<text x="105" y="1143" text-anchor="start" font-size="24" font-weight="400" fill="#176FA7">原生账号 A / 原生账号 B（结构示意）</text>
+<text x="1010" y="1091" text-anchor="middle" font-size="26" font-weight="600" fill="#17324F">VPS 自身原有出网路径</text>
+<text x="1010" y="1143" text-anchor="middle" font-size="24" font-weight="400" fill="#60758B">不由 Mac 专用入口接管</text>
+<text x="1645" y="1091" text-anchor="middle" font-size="28" font-weight="600" fill="#17324F">Anthropic 官方服务</text>
+<text x="1645" y="1143" text-anchor="middle" font-size="23" font-weight="400" fill="#60758B">本轮未核验登录态及实际出口</text>
+<polyline points="660,1118 760,1118" fill="none" stroke="#60758B" stroke-width="4" stroke-linejoin="round" />
+<polygon points="760.0,1118.0 748.0,1112.0 748.0,1124.0" fill="#60758B" />
+<polyline points="1260,1118 1370,1118" fill="none" stroke="#60758B" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1370.0,1118.0 1358.0,1112.0 1358.0,1124.0" fill="#60758B" />
+<text x="80" y="1232" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">Mac 的美国②节点沿用既有 VPS 配置；VPS 当前服务、双账号状态与出站，本轮未远程复核。</text>
+<text x="50" y="1323" text-anchor="start" font-size="24" font-weight="400" fill="#60758B">普通连接先按前置共享域名规则；其余有效白名单走机场；未命中再 DIRECT，内网也按实际顺序判断。</text>
+<text x="50" y="1368" text-anchor="start" font-size="24" font-weight="400" fill="#60758B">专用 Edge / CLI 使用 17897；普通应用通过 7897 / TUN 按顺序匹配，实际优先级见第二张图。</text>
+<text x="50" y="1413" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">仅本机脱敏快照；真实节点与策略保留在私有配置中，不作为其他设备已部署的证明。</text></g></svg>

@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="1770" viewBox="0 0 2000 1770" role="img" aria-labelledby="title desc"><title id="title">本机部署示例（2026-10-25快照）：Clash分流规则</title><desc id="desc">本机部署示例（2026-10-25快照），不是通用安装拓扑；真实节点与策略在私有配置中，不随源码分发。2026-10-25实时策略。专用Edge和原生CLI先完整预检，再通过17897绑定具体US节点，不经过普通规则表。普通7897和TUN流量依次经过1至106条规则，首次命中结束；106为MATCH,DIRECT，107起订阅规则当前不可达。固定组保留US HTTP、US SS2022与JP SOCKS5，当前仅US HTTP匹配严格US基线与IP锁。真实地址、节点私名及凭据隐藏。</desc><rect width="2000" height="1770" fill="white" /><g font-family="PingFang SC,Microsoft YaHei,sans-serif"><text x="50" y="75" text-anchor="start" font-size="41" font-weight="600" fill="#17324F">本机部署示例：专用入口固定，普通流量按序分流</text>
+<text x="50" y="122" text-anchor="start" font-size="24" font-weight="400" fill="#60758B">2026-10-25 快照 · 规则条号与三节点仅属该机私有配置，不是所有用户安装后的默认拓扑</text>
+<rect x="50" y="155" width="1900" height="110" rx="12" fill="#EEF6FC" stroke="none" stroke-width="2" />
+<rect x="80" y="173" width="395" height="49" rx="10" fill="white" stroke="#AACCE3" stroke-width="2" />
+<text x="277.5" y="207" text-anchor="middle" font-size="27" font-weight="600" fill="#176FA7">专用 Edge / 原生 CLI</text>
+<polyline points="475,198 565,198" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="565.0,198.0 553.0,192.0 553.0,204.0" fill="#176FA7" />
+<rect x="565" y="173" width="625" height="49" rx="10" fill="white" stroke="#AACCE3" stroke-width="2" />
+<text x="877.5" y="207" text-anchor="middle" font-size="27" font-weight="600" fill="#176FA7">完整预检 → 127.0.0.1:17897</text>
+<polyline points="1190,198 1280,198" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1280.0,198.0 1268.0,192.0 1268.0,204.0" fill="#176FA7" />
+<rect x="1280" y="173" width="640" height="49" rx="10" fill="white" stroke="#AACCE3" stroke-width="2" />
+<text x="1600" y="207" text-anchor="middle" font-size="27" font-weight="600" fill="#176FA7">绑定具体 US① · 绕过普通规则表</text>
+<text x="80" y="249" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">流量仍经当前 Trojan 前置 → 固定 US① → 目标；专用预检失败不打开，不回退普通入口。</text>
+<rect x="460" y="285" width="930" height="1240" rx="24" fill="#F4F7FB" stroke="#CBD9E8" stroke-width="2" />
+<text x="495" y="328" text-anchor="start" font-size="31" font-weight="600" fill="#17324F">普通入口：规则从上往下匹配</text>
+<text x="495" y="358" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">未命中才继续；命中即选出站并结束匹配</text>
+<text x="1510" y="328" text-anchor="start" font-size="31" font-weight="600" fill="#17324F">命中后的出站策略</text>
+<rect x="50" y="385" width="320" height="170" rx="18" fill="#F1F6FC" stroke="#CCDDEC" stroke-width="2" />
+<text x="75" y="432" text-anchor="start" font-size="30" font-weight="600" fill="#17324F">Mac 普通应用</text>
+<text x="75" y="478" text-anchor="start" font-size="23" font-weight="400" fill="#17324F">浏览器 · 桌面端 · 工具</text>
+<text x="75" y="522" text-anchor="start" font-size="24" font-weight="400" fill="#60758B">按实际连接分别判断</text>
+<polyline points="210,555 210,635" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="210.0,635.0 216.0,623.0 204.0,623.0" fill="#176FA7" />
+<rect x="50" y="635" width="320" height="175" rx="18" fill="white" stroke="#AACCE3" stroke-width="2" />
+<text x="75" y="681" text-anchor="start" font-size="27" font-weight="600" fill="#176FA7">两种普通接入方式</text>
+<text x="75" y="729" text-anchor="start" font-size="25" font-weight="400" fill="#17324F">系统代理 :7897</text>
+<text x="75" y="776" text-anchor="start" font-size="25" font-weight="400" fill="#17324F">TUN 虚拟网卡</text>
+<polyline points="370,724 415,724 415,328 460,328" fill="none" stroke="#176FA7" stroke-width="4" stroke-linejoin="round" />
+<polygon points="460.0,328.0 448.0,322.0 448.0,334.0" fill="#176FA7" />
+<rect x="495" y="390" width="860" height="100" rx="18" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="429" text-anchor="start" font-size="28" font-weight="600" fill="#A55F30">1–7   UDP 端口 / 指定 STUN</text>
+<text x="525" y="469" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">3478 / 5349 / 19302 及指定 STUN 域 → REJECT</text>
+<rect x="495" y="525" width="860" height="110" rx="18" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="564" text-anchor="start" font-size="28" font-weight="600" fill="#23754F">8–20   Claude 及关联域名</text>
+<text x="525" y="604" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">Claude / Anthropic / Cloudflare 挑战 / 支付辅助域</text>
+<rect x="495" y="670" width="860" height="100" rx="18" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="709" text-anchor="start" font-size="28" font-weight="600" fill="#17324F">21–24   公司 / 内网 CIDR</text>
+<text x="525" y="749" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">未被更前规则命中的内网连接 → DIRECT</text>
+<rect x="495" y="805" width="860" height="110" rx="18" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="844" text-anchor="start" font-size="28" font-weight="600" fill="#A55F30">25–44   AI 范围 UDP 拒绝</text>
+<text x="525" y="884" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">继续按既定 AI 范围阻断 UDP / STUN</text>
+<rect x="495" y="950" width="860" height="140" rx="18" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="989" text-anchor="start" font-size="28" font-weight="600" fill="#23754F">45–73   Claude 进程 / OpenAI / 检测站</text>
+<text x="525" y="1029" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">桌面公网 TCP、OpenAI、IPPure / Ping0 等</text>
+<rect x="495" y="1125" width="860" height="140" rx="18" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="1164" text-anchor="start" font-size="28" font-weight="600" fill="#7157A6">74–105   其余有效机场白名单</text>
+<text x="525" y="1204" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">Google / YouTube / GitHub / HF / Perplexity 等</text>
+<rect x="495" y="1300" width="860" height="100" rx="18" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="1339" text-anchor="start" font-size="28" font-weight="600" fill="#17324F">106   MATCH,DIRECT 最终兜底</text>
+<text x="525" y="1379" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">接住所有剩余连接，普通规则匹配到此结束</text>
+<text x="525" y="1070" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">部分重复项已被第 8–20 条提前命中</text>
+<text x="525" y="1245" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">内含的重复 AI / 检测域名，实际已先走固定 US</text>
+<polyline points="925,490 925,525" fill="none" stroke="#9AAEBF" stroke-width="3" stroke-linejoin="round" />
+<polygon points="925.0,525.0 931.0,513.0 919.0,513.0" fill="#9AAEBF" />
+<text x="950" y="513.5" text-anchor="start" font-size="18" font-weight="400" fill="#60758B">未命中</text>
+<polyline points="925,635 925,670" fill="none" stroke="#9AAEBF" stroke-width="3" stroke-linejoin="round" />
+<polygon points="925.0,670.0 931.0,658.0 919.0,658.0" fill="#9AAEBF" />
+<text x="950" y="658.5" text-anchor="start" font-size="18" font-weight="400" fill="#60758B">未命中</text>
+<polyline points="925,770 925,805" fill="none" stroke="#9AAEBF" stroke-width="3" stroke-linejoin="round" />
+<polygon points="925.0,805.0 931.0,793.0 919.0,793.0" fill="#9AAEBF" />
+<text x="950" y="793.5" text-anchor="start" font-size="18" font-weight="400" fill="#60758B">未命中</text>
+<polyline points="925,915 925,950" fill="none" stroke="#9AAEBF" stroke-width="3" stroke-linejoin="round" />
+<polygon points="925.0,950.0 931.0,938.0 919.0,938.0" fill="#9AAEBF" />
+<text x="950" y="938.5" text-anchor="start" font-size="18" font-weight="400" fill="#60758B">未命中</text>
+<polyline points="925,1090 925,1125" fill="none" stroke="#9AAEBF" stroke-width="3" stroke-linejoin="round" />
+<polygon points="925.0,1125.0 931.0,1113.0 919.0,1113.0" fill="#9AAEBF" />
+<text x="950" y="1113.5" text-anchor="start" font-size="18" font-weight="400" fill="#60758B">未命中</text>
+<polyline points="925,1265 925,1300" fill="none" stroke="#9AAEBF" stroke-width="3" stroke-linejoin="round" />
+<polygon points="925.0,1300.0 931.0,1288.0 919.0,1288.0" fill="#9AAEBF" />
+<text x="950" y="1288.5" text-anchor="start" font-size="18" font-weight="400" fill="#60758B">未命中</text>
+<rect x="1510" y="390" width="440" height="100" rx="18" fill="#FFF4EC" stroke="#EDDDCD" stroke-width="2" />
+<text x="1535" y="429" text-anchor="start" font-size="28" font-weight="600" fill="#A55F30">REJECT · 前置 UDP / STUN</text>
+<text x="1535" y="469" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">不继续匹配，不改走其他出口</text>
+<polyline points="1355,440.0 1510,440.0" fill="none" stroke="#A55F30" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1510.0,440.0 1498.0,434.0 1498.0,446.0" fill="#A55F30" />
+<text x="1432.5" y="425.0" text-anchor="middle" font-size="20" font-weight="400" fill="#A55F30">命中</text>
+<rect x="1510" y="525" width="440" height="110" rx="18" fill="#EDF7F1" stroke="#A9CDC0" stroke-width="2" />
+<text x="1535" y="564" text-anchor="start" font-size="28" font-weight="600" fill="#23754F">AI-固定IP → US①</text>
+<text x="1535" y="604" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">Trojan 前置 → 当前固定美国出口</text>
+<polyline points="1355,580.0 1510,580.0" fill="none" stroke="#23754F" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1510.0,580.0 1498.0,574.0 1498.0,586.0" fill="#23754F" />
+<text x="1432.5" y="565.0" text-anchor="middle" font-size="20" font-weight="400" fill="#23754F">命中</text>
+<rect x="1510" y="670" width="440" height="100" rx="18" fill="#F5F7FA" stroke="#D6E0EB" stroke-width="2" />
+<text x="1535" y="709" text-anchor="start" font-size="28" font-weight="600" fill="#17324F">DIRECT · 公司 / 内网</text>
+<text x="1535" y="749" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">保留本地直连路径</text>
+<polyline points="1355,720.0 1510,720.0" fill="none" stroke="#17324F" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1510.0,720.0 1498.0,714.0 1498.0,726.0" fill="#17324F" />
+<text x="1432.5" y="705.0" text-anchor="middle" font-size="20" font-weight="400" fill="#17324F">命中</text>
+<rect x="1510" y="805" width="440" height="110" rx="18" fill="#FFF4EC" stroke="#EDDDCD" stroke-width="2" />
+<text x="1535" y="844" text-anchor="start" font-size="28" font-weight="600" fill="#A55F30">REJECT · AI 范围 UDP</text>
+<text x="1535" y="884" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">不回落至机场 / DIRECT</text>
+<polyline points="1355,860.0 1510,860.0" fill="none" stroke="#A55F30" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1510.0,860.0 1498.0,854.0 1498.0,866.0" fill="#A55F30" />
+<text x="1432.5" y="845.0" text-anchor="middle" font-size="20" font-weight="400" fill="#A55F30">命中</text>
+<rect x="1510" y="950" width="440" height="140" rx="18" fill="#EDF7F1" stroke="#A9CDC0" stroke-width="2" />
+<text x="1535" y="989" text-anchor="start" font-size="28" font-weight="600" fill="#23754F">AI-固定IP → US①</text>
+<text x="1535" y="1029" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">与第 8–20 条使用同一固定组</text>
+<polyline points="1355,1020.0 1510,1020.0" fill="none" stroke="#23754F" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1510.0,1020.0 1498.0,1014.0 1498.0,1026.0" fill="#23754F" />
+<text x="1432.5" y="1005.0" text-anchor="middle" font-size="20" font-weight="400" fill="#23754F">命中</text>
+<rect x="1510" y="1125" width="440" height="140" rx="18" fill="#F3EFF9" stroke="#D1C8E3" stroke-width="2" />
+<text x="1535" y="1164" text-anchor="start" font-size="28" font-weight="600" fill="#7157A6">当前机场出口</text>
+<text x="1535" y="1204" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">最终 IP：当前机场节点的出口</text>
+<polyline points="1355,1195.0 1510,1195.0" fill="none" stroke="#7157A6" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1510.0,1195.0 1498.0,1189.0 1498.0,1201.0" fill="#7157A6" />
+<text x="1432.5" y="1180.0" text-anchor="middle" font-size="20" font-weight="400" fill="#7157A6">命中</text>
+<rect x="1510" y="1300" width="440" height="100" rx="18" fill="#F5F7FA" stroke="#D6E0EB" stroke-width="2" />
+<text x="1535" y="1339" text-anchor="start" font-size="28" font-weight="600" fill="#17324F">DIRECT · 其余连接</text>
+<text x="1535" y="1379" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">本地运营商出口</text>
+<polyline points="1355,1350.0 1510,1350.0" fill="none" stroke="#17324F" stroke-width="4" stroke-linejoin="round" />
+<polygon points="1510.0,1350.0 1498.0,1344.0 1498.0,1356.0" fill="#17324F" />
+<text x="1432.5" y="1335.0" text-anchor="middle" font-size="20" font-weight="400" fill="#17324F">命中</text>
+<text x="1535" y="1070" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">重复 Claude 项已在前面结束匹配</text>
+<text x="1535" y="1245" text-anchor="start" font-size="22" font-weight="400" fill="#60758B">不包括前面已命中的 AI 域名</text>
+<rect x="50" y="870" width="320" height="465" rx="18" fill="#F6F8FB" stroke="#D8E0E8" stroke-width="2" />
+<text x="75" y="917" text-anchor="start" font-size="27" font-weight="600" fill="#17324F">固定出口组仍保留</text>
+<text x="75" y="964" text-anchor="start" font-size="29" font-weight="600" fill="#23754F">AI-固定IP</text>
+<rect x="70" y="974" width="280" height="46" rx="10" fill="#176FA7" stroke="#D6E0EB" stroke-width="2" />
+<text x="85" y="1005" text-anchor="start" font-size="23" font-weight="600" fill="white">US① HTTP · 当前</text>
+<rect x="70" y="1034" width="280" height="46" rx="10" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="85" y="1065" text-anchor="start" font-size="23" font-weight="600" fill="#176FA7">US② SS2022 · 备用</text>
+<rect x="70" y="1094" width="280" height="46" rx="10" fill="white" stroke="#D6E0EB" stroke-width="2" />
+<text x="85" y="1125" text-anchor="start" font-size="23" font-weight="600" fill="#176FA7">JP SOCKS5 · 备用</text>
+<text x="75" y="1200" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">三项均经 Trojan 前置</text>
+<text x="75" y="1243" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">当前 US① 与 IP 锁一致</text>
+<text x="75" y="1287" text-anchor="start" font-size="23" font-weight="400" fill="#A55F30">严格模式不允许随意切换</text>
+<text x="925" y="1428" text-anchor="middle" font-size="19" font-weight="400" fill="#A55F30">第 106 条已接住全部剩余连接</text>
+<rect x="495" y="1445" width="860" height="65" rx="12" fill="#E9EDF2" stroke="#D6E0EB" stroke-width="2" />
+<text x="525" y="1486" text-anchor="start" font-size="25" font-weight="600" fill="#60758B">107 起：订阅尾部规则目前不会参与匹配</text>
+<rect x="50" y="1570" width="1900" height="110" rx="16" fill="#EEF6FC" stroke="none" stroke-width="2" />
+<text x="80" y="1614" text-anchor="start" font-size="28" font-weight="600" fill="#176FA7">先命中即结束：内网不是第一条，订阅尾部也不是当前兜底；最终兜底是第 106 条 DIRECT。</text>
+<text x="80" y="1656" text-anchor="start" font-size="23" font-weight="400" fill="#17324F">前置 UDP 端口拒绝适用于经过 Mihomo 的连接；备用 US② / JP 保留，但专用入口仍受严格 US 基线和固定 IP 锁约束。</text>
+<text x="50" y="1730" text-anchor="start" font-size="23" font-weight="400" fill="#60758B">仅本机脱敏快照；节点、条号和前置代理由私有配置决定，不作为其他设备已部署的证明。</text></g></svg>
