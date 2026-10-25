@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import shutil
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -29,10 +30,60 @@ class ProtectedAccessTests(unittest.TestCase):
         self.assertIn('--disable-quic', args)
         self.assertIn('--lang=en-US', args)
         self.assertIn('--accept-lang=en-US,en', args)
-        self.assertIn('--disable-extensions', args)
+        extension = str(access.font_guard_path())
+        self.assertNotIn('--disable-extensions', args)
+        self.assertIn('--disable-extensions-except=' + extension, args)
+        self.assertIn('--load-extension=' + extension, args)
         self.assertIn('--force-webrtc-ip-handling-policy=disable_non_proxied_udp', args)
         self.assertIn('--webrtc-ip-handling-policy=disable_non_proxied_udp', args)
         self.assertIn('--profile-directory=Default', args)
+
+    def test_font_guard_integrity_rejects_changed_files_and_links(self):
+        with tempfile.TemporaryDirectory(prefix='font-guard-integrity-') as folder:
+            root = Path(folder)
+            extension = root / 'font-guard'
+            shutil.copytree(ROOT / 'core/font-guard', extension)
+            with patch.object(access, '__file__', str(root / 'protected-access.py')):
+                self.assertEqual(access.font_guard_path(), extension)
+                for name in access.FONT_GUARD_HASHES:
+                    with self.subTest(name=name):
+                        path = extension / name
+                        original = path.read_bytes()
+                        path.write_bytes(original + b'changed')
+                        with self.assertRaises(ValueError):
+                            access.font_guard_path()
+                        path.write_bytes(original)
+                path = extension / 'font-guard.js'
+                original = path.read_bytes()
+                path.unlink()
+                other = root / 'other.js'
+                other.write_bytes(original)
+                path.symlink_to(other)
+                with self.assertRaises(ValueError):
+                    access.font_guard_path()
+
+    def test_extension_path_with_spaces_has_exact_runtime_arguments(self):
+        from subprocess import CompletedProcess
+        with tempfile.TemporaryDirectory(prefix='font-guard-spaces-') as folder:
+            root = Path(folder) / 'space in directory'
+            root.mkdir()
+            shutil.copytree(ROOT / 'core/font-guard', root / 'font-guard')
+            profile = root / 'profile'
+            with patch.object(access, '__file__', str(root / 'protected-access.py')):
+                command = '123 ' + ' '.join(access.browser_command(profile))
+                with patch.object(access.subprocess, 'run', return_value=CompletedProcess([], 0, command)):
+                    self.assertTrue(access.running_browser(profile))
+                extra = command + ' --load-extension=/fixture/other'
+                with patch.object(access.subprocess, 'run', return_value=CompletedProcess([], 0, extra)):
+                    with self.assertRaises(ValueError):
+                        access.running_browser(profile)
+
+    def test_missing_font_guard_stops_browser_without_reading_account_data(self):
+        with patch('sys.argv', ['protected-access.py', 'browser']), patch.object(access, 'preflight', return_value=17897), patch.object(access, 'managed_policy_baseline'), patch.object(access, 'EDGE', ROOT / 'core/protected-access.py'), patch.object(access, 'font_guard_path', side_effect=ValueError('private failure')), patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(access.main(), 1)
+            launch.assert_not_called()
+            self.assertIn('完整性', error.getvalue())
+            self.assertNotIn('private failure', error.getvalue())
 
     def test_preflight_requires_protected_route_evidence_and_returns_its_port(self):
         policy = {'mode': 'clash-selector', 'group': 'Fixture',
@@ -122,7 +173,9 @@ class ProtectedAccessTests(unittest.TestCase):
             self.assertTrue(access.running_browser(profile))
             for text in [current.replace('--disable-quic', ''),
                          current.replace('--accept-lang=en-US,en', ''),
-                         current.replace('--disable-extensions', ''),
+                         current.replace('--disable-extensions-except=', '--missing-whitelist='),
+                         current.replace('https://claude.ai/', '--disable-extensions https://claude.ai/'),
+                         current.replace('https://claude.ai/', '--load-component-extension=/fixture/other https://claude.ai/'),
                          current.replace('--webrtc-ip-handling-policy=disable_non_proxied_udp', ''),
                          current.replace('http://127.0.0.1:17897', 'http://127.0.0.1:17898'),
                          current.replace('https://claude.ai/', '--proxy-bypass-list=* https://claude.ai/'),
@@ -162,6 +215,63 @@ class ProtectedAccessTests(unittest.TestCase):
                 self.assertEqual(access.main(), 0)
                 seed.assert_not_called()
                 self.assertIn('已请求打开', output.getvalue())
+                self.assertEqual(launch.call_args.args[0][-1], 'https://claude.ai/')
+
+    def test_external_checks_use_fixed_urls_and_the_complete_protected_launch(self):
+        for target, url, label in [('ippure', 'https://ippure.com/claude', 'IPPure'),
+                                   ('ping0', 'https://ping0.cc/ip/', 'Ping0')]:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as folder:
+                home = Path(folder)
+                binary = home / 'edge'
+                binary.touch()
+                profile = home / 'Library/Application Support' / access.PROFILE_NAME
+                access.seed_profile(profile)
+                expected = access.browser_command(profile, url=url, port=17897)
+                expected[0] = str(binary)
+                with patch('sys.argv', ['protected-access.py', 'browser', target]), patch.object(access.Path, 'home', return_value=home), patch.object(access, 'EDGE', binary), patch.object(access, 'preflight', return_value=17897) as preflight, patch.object(access, 'managed_policy_baseline') as policy, patch.object(access, 'font_guard_path', wraps=access.font_guard_path) as font, patch.object(access, 'running_browser', return_value=True) as running, patch.object(access, 'profile_baseline', wraps=access.profile_baseline) as baseline, patch.object(access, 'seed_profile') as seed, patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stdout(io.StringIO()) as output:
+                    launch.return_value.wait.return_value = 0
+                    self.assertEqual(access.main(), 0)
+                    preflight.assert_called_once_with(home)
+                    policy.assert_called_once_with(home)
+                    self.assertGreaterEqual(font.call_count, 1)
+                    running.assert_called_with(profile, 17897)
+                    baseline.assert_called_once_with(profile)
+                    seed.assert_not_called()
+                    self.assertEqual(launch.call_args.args[0], expected)
+                    env = launch.call_args.kwargs['env']
+                    self.assertEqual(env['TZ'], 'America/Chicago')
+                    self.assertEqual(env['LANG'], 'en_US.UTF-8')
+                    self.assertIn(label + '外部检测', output.getvalue())
+                    self.assertIn('未读取检测分数', output.getvalue())
+
+    def test_invalid_external_check_never_initializes_or_launches(self):
+        for arguments in [['unknown'], ['https://ippure.com/claude'], ['https://ping0.cc/ip/'],
+                          ['ippure', 'ping0'], ['--proxy-server=direct://'], ['claude']]:
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as folder:
+                home = Path(folder)
+                with patch('sys.argv', ['protected-access.py', 'browser'] + arguments), patch.object(access.Path, 'home', return_value=home), patch.object(access, 'preflight') as preflight, patch.object(access, 'seed_profile') as seed, patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(access.main(), 2)
+                    preflight.assert_not_called()
+                    seed.assert_not_called()
+                    launch.assert_not_called()
+                    self.assertEqual(list(home.iterdir()), [])
+
+    def test_other_non_cli_actions_still_reject_additional_arguments(self):
+        for action in ['check', 'harden', 'provider-audit', 'report']:
+            with self.subTest(action=action), patch('sys.argv', ['protected-access.py', action, 'ippure']), patch.object(access, 'preflight') as preflight, patch.object(access, 'support_report') as report, patch.object(access, 'provider_audit') as audit, patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(access.main(), 2)
+                preflight.assert_not_called()
+                report.assert_not_called()
+                audit.assert_not_called()
+                launch.assert_not_called()
+
+    def test_external_checks_do_not_bypass_failed_preflight(self):
+        for target in ['ippure', 'ping0']:
+            with self.subTest(target=target), patch('sys.argv', ['protected-access.py', 'browser', target]), patch.object(access, 'preflight', side_effect=ValueError('private-token')), patch.object(access, 'seed_profile') as seed, patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(access.main(), 1)
+                seed.assert_not_called()
+                launch.assert_not_called()
+                self.assertNotIn('private-token', error.getvalue())
 
     def test_new_browser_still_running_is_an_open_request(self):
         with tempfile.TemporaryDirectory() as folder:

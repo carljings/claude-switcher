@@ -9,6 +9,9 @@ shasum -a 256 \
     core/protected-access.py \
     core/clash-profile-guard.py \
     core/clash-profile-guard.js \
+    core/font-guard/manifest.json \
+    core/font-guard/font-guard.js \
+    core/font-guard/LICENSE \
     daemons/claude-bodyguard.sh \
     daemons/tz-watchdog.sh \
     daemons/local.claude-bodyguard.plist \

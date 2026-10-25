@@ -33,6 +33,12 @@ if [ -e "$APP" ] || [ -L "$APP" ]; then
     fi
 fi
 # ---- 用户态脚本 ----
+FONT_GUARD="$HOME/.claude-switcher/font-guard"
+if [ -d "$FONT_GUARD" ] && [ ! -L "$FONT_GUARD" ]; then
+    mkdir -p "$HOME/.claude-switcher/component-backups"
+    FONT_BACKUP=$(mktemp -d "$HOME/.claude-switcher/component-backups/uninstalled-font-guard.XXXXXX")
+    [ -z "$FONT_BACKUP" ] || mv "$FONT_GUARD" "$FONT_BACKUP/font-guard"
+fi
 rm -f "$HOME/.local/bin/claude-switch.sh" "$HOME/.local/bin/claude-bodyguard.sh" "$HOME/.local/bin/tz-watchdog.sh" "$HOME/.local/bin/local.claude-bodyguard.plist" "$HOME/.local/bin/local.tz-watchdog.plist" "$HOME/.local/bin/local.claude-update.plist" "$HOME/.local/bin/claude-switch.sh.bak" "$HOME/.local/bin/claude-bodyguard.sh.bak" "$HOME/.local/bin/tz-watchdog.sh.bak"
 echo ""
 echo "✅ 已卸载。"

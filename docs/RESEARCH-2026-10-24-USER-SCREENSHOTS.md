@@ -2,6 +2,8 @@
 
 日期：2026-10-24。截图1没有明确原始出处；截图2是转发画面，署名`@Abelnadp`，原帖及发布时间尚未独立核验。以下分析只针对截图可见文字，不把作者自述作为已确认的服务端规则；不把手机界面或附件本身提交到仓库。
 
+本文件保留决定发生的先后顺序。下文“不加网页遮罩”是20261024.7阶段的取舍，已被后文20261024.8的明确授权覆盖；系统字体和真实UA始终保留。
+
 ## 截图1：技术能力与封禁推断混在一起
 
 | 主张 | 核对结果 | 依据与本轮处理 |
@@ -36,6 +38,26 @@
 
 已向用户说明自有脚本遮罩的PDF／图表兼容风险、修改痕迹及Worker／iframe覆盖边界。用户明确选择：**保留真实Mac字体，维持已验证的权限防护**。因此本轮不加站点字体遮罩，不修改UA为其他系统，不删除系统字体；该项是明确取舍，不是遗漏或伪报通过。
 
+以上为当时的阶段性决定，不代表随后版本一直禁止字体测量过滤。
+
 追加核对没有找到受支持的Edge按Profile字体白名单或`measureText()`禁用选项。[Chromium开关](https://github.com/chromium/chromium/blob/main/content/public/common/content_switches.cc)里的`--disable-reading-from-canvas`限制像素读取，不能据此宣称封锁字宽；`--disable-remote-fonts`限制远程字体，不能当作本地字体隐藏。[Canvas实现](https://github.com/chromium/chromium/blob/main/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc)与[内容脚本覆盖范围](https://developer.chrome.com/docs/extensions/reference/manifest/content-scripts)分别说明了这些边界。
 
 本机Edge156隔离试验能通过侧载参数注入无权限localhost测试标记扩展，与通用工具文档的限制描述存在差异；但没有实现或在真实Profile加载字体遮罩。所有该试验临时进程与资料已清理，不能把“能加载测试扩展”写成字体防护已完成。
+
+## 20261024.8：后续授权与生产验收
+
+用户随后比较普通Edge与专用Edge：普通Edge通过此前的Site Locale Control取得总分2、字体项0，专用Edge禁扩展且保留原生测量，字体项加20。两种配置的字体测量策略并不相同，不能用专用出口的强度来否认这一实在差分。
+
+用户继而明确要求给专用浏览器“加上这个插件或者插件的能力”。新授权覆盖先前不加网页遮罩的选择。本轮只复用[最小字体过滤能力](PLUGIN-FONT-GUARD.md)，没有完整移植原插件的日期、语言、UA或WebRTC覆盖；真实系统字体、Mac UA、原生Chicago/en-US与固定代理仍保留。
+
+本次证据分开记录：
+
+| 证据 | 结果与范围 |
+|---|---|
+| 自动回归 | 175项Python测试、14个隔离Swift UI场景通过。包括字体算法、三文件完整性、额外loader拒绝、旧进程参数拒绝和组件安装竞态等。 |
+| 真实Edge隔离实验 | headless／headed中预置4种字体从可测变为0；正常字体测量、font恢复及给定固定绘制场景像素哈希不变；非白名单localhost仍可测4种。测试manifest的localhost匹配不进入生产配置。 |
+| 用户手工生产验收 | 用户确认切换器底部版本为`20261024.8`，生产专用Edge访问IPPure后字体0分、总分2分。这不是自动截图或自动扫描结果。 |
+
+生产组件仅匹配六个Claude／IPPure HTTPS模式，静态MAIN脚本不读正文、Cookie、token或认证信息、不联网。它仍是可被站点识别或干扰的页面层测量补丁，不覆盖全部Worker、DOM/CSS或iframe时序；测量与真实字形不一致仍可能影响PDF／图表布局。源码沿用MIT声明，范围和维护要求见组件说明。
+
+本次未新增外部检测入口或自动扫描按钮；这些属于后续设计，不能计入20261024.8已实现能力。该站分数也不等于Claude账号权限或服务端风控结论。

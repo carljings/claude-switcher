@@ -36,6 +36,13 @@ class ProtectedDispatchTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), ['harden'])
 
+    def test_external_browser_ids_are_preserved_without_creating_accounts(self):
+        for target in ['ippure', 'ping0']:
+            with self.subTest(target=target):
+                result = self.invoke(['protected-browser', target])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), ['browser', target])
+
     def test_helper_failure_is_not_changed_to_shell_success(self):
         result = self.invoke(['protected-cli', '/fixture/native'], helper_exit=9)
         self.assertEqual(result.returncode, 9)

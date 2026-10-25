@@ -65,6 +65,7 @@ import SwiftUI
         vm.confirmOpen()
         vm.refresh()
         vm.openProtectedBrowser()
+        vm.openProtectedBrowser(target: .ippure)
         assert(vm.selectedAccount == "B" && !vm.canConfirmOpen && !vm.canRescan)
         let afterEmailEdit = try commands()
         assert(afterEmailEdit == beforeSelection)
@@ -106,6 +107,43 @@ import SwiftUI
         await waitUntil { vm.phase == .ready && !vm.isScanning }
         assert(vm.selectedAccount == "B")
         passed.append("repair completion can rescan while preserving selection")
+
+        let targets: [ExternalCheckTarget?] = [nil, .ippure, .ping0]
+        for target in targets {
+            let before = try commands()
+            let selected = vm.selectedAccount
+            let current = vm.current
+            vm.openProtectedBrowser(target: target)
+            assert(vm.isOpeningProtected && !vm.canRescan && !vm.canConfirmOpen)
+            assert(vm.protectedMessage.contains("预检"))
+            vm.openProtectedBrowser(target: .ping0)
+            vm.openProtectedBrowser()
+            vm.refresh()
+            vm.fixAll()
+            vm.inspectDevice()
+            vm.confirmOpen()
+            vm.selectAccount("A")
+            assert(vm.selectedAccount == selected && vm.current == current && vm.phase == .ready)
+            await waitUntil { !vm.isOpeningProtected }
+            let after = try commands()
+            let expected = "protected-browser" + (target.map { " " + $0.rawValue } ?? "")
+            assert(Array(after.dropFirst(before.count)) == [expected])
+            assert(vm.protectedMessage == "OK:fixture protected " + (target?.rawValue ?? "claude"))
+            passed.append("protected browser dispatches " + (target?.rawValue ?? "default") + " without profile operations")
+        }
+        passed.append("protected browser preflight blocks reentry and all competing operations")
+        for mode in ["failure", "nonzero-success", "empty"] {
+            try write("protected-mode", mode)
+            let before = try commands()
+            vm.openProtectedBrowser(target: .ippure)
+            await waitUntil { !vm.isOpeningProtected }
+            let after = try commands()
+            assert(Array(after.dropFirst(before.count)) == ["protected-browser ippure"])
+            assert(!vm.protectedMessage.isEmpty && !vm.protectedMessage.hasPrefix("OK:"))
+            if mode != "empty" { assert(vm.protectedMessage.hasPrefix("FAIL:")) }
+            assert(vm.phase == .ready && vm.canRescan && vm.current == "B" && vm.selectedAccount == "B")
+            passed.append("protected browser " + mode + " reports failure without fallback or switch")
+        }
 
         try write("mode", "same-current")
         vm.confirmOpen()

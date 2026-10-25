@@ -112,6 +112,32 @@ echo "✓ 地区自适应: 国家=$CTRY 时区=$TZV 地区格式=$LOCALE (按当
 mkdir -p "$H/.local/bin" "$H/.claude-switcher" "$H/Library/Logs"
 cp "$REPO/core/claude-switch.sh" "$H/.local/bin/"
 cp "$REPO/core/stun-probe.py" "$REPO/core/network-audit.py" "$REPO/core/protected-access.py" "$REPO/core/clash-profile-guard.py" "$REPO/core/clash-profile-guard.js" "$H/.claude-switcher/"
+# 字体组件单独暂存,已有副本先保留,不合并未知文件。
+FONT_GUARD="$H/.claude-switcher/font-guard"
+if [ -L "$FONT_GUARD" ] || { [ -e "$FONT_GUARD" ] && [ ! -d "$FONT_GUARD" ]; }; then
+    echo "✗ 字体组件目标类型异常,已保留,请人工核对"; exit 1
+fi
+FONT_STAGE=$(mktemp -d "$H/.claude-switcher/.font-guard-install.XXXXXX") || exit 1
+if ! cp -R "$REPO/core/font-guard" "$FONT_STAGE/"; then
+    rm -rf "$FONT_STAGE"; exit 1
+fi
+FONT_BACKUP=""
+if [ -e "$FONT_GUARD" ]; then
+    mkdir -p "$H/.claude-switcher/component-backups" || { rm -rf "$FONT_STAGE"; exit 1; }
+    FONT_BACKUP=$(mktemp -d "$H/.claude-switcher/component-backups/font-guard.XXXXXX") || { rm -rf "$FONT_STAGE"; exit 1; }
+    mv "$FONT_GUARD" "$FONT_BACKUP/font-guard" || { rm -rf "$FONT_STAGE"; exit 1; }
+fi
+if [ -e "$FONT_GUARD" ] || [ -L "$FONT_GUARD" ]; then
+    echo "✗ 字体组件目标已变化,已保留目标及原组件备份,请人工核对"
+    rm -rf "$FONT_STAGE"; exit 1
+fi
+if ! mv "$FONT_STAGE/font-guard" "$FONT_GUARD"; then
+    if [ -n "$FONT_BACKUP" ] && [ ! -e "$FONT_GUARD" ] && [ ! -L "$FONT_GUARD" ]; then
+        mv "$FONT_BACKUP/font-guard" "$FONT_GUARD" || echo "✗ 原字体组件恢复失败,备份已保留,请人工核对"
+    fi
+    rm -rf "$FONT_STAGE"; exit 1
+fi
+rmdir "$FONT_STAGE"
 chmod +x "$H/.local/bin/claude-switch.sh"
 # 写入探测到的客户端/代理组名/地区目标
 sed -i '' \
@@ -162,7 +188,19 @@ check_app_targets || exit 1
 APP_BUILD_ROOT=$(mktemp -d "$H/Applications/.claude-switcher-build.XXXXXX") || exit 1
 APP_BUILD="$APP_BUILD_ROOT/Claude切换器.app"
 APP_BACKUP=""
+app_saved_id=""; desktop_saved_id=""; app_installed_id=""
 app_saved=0; desktop_saved=0; app_installed=0; desktop_created=0; app_committed=0
+app_path_id() {
+    /usr/bin/stat -f '%d:%i' "$1" 2>/dev/null
+}
+remove_replaced_app() {
+    if [ -z "$2" ] || [ "$(app_path_id "$1")" != "$2" ] \
+        || { [ ! -L "$1" ] && ! is_switcher_app "$1"; }; then
+        echo "✗ 旧 App 备份目标已变化,保留供人工核对: $1"
+        return 1
+    fi
+    if [ -L "$1" ]; then rm -f "$1"; else rm -rf "$1"; fi
+}
 cleanup_app_install() {
     result=$?
     trap - EXIT
@@ -171,7 +209,11 @@ cleanup_app_install() {
             rm -f "$DESKTOP_APP"
         fi
         if [ "$app_installed" = "1" ]; then
-            mv "$APP" "$APP_BACKUP/failed.app" || echo "✗ 新包无法转存,请人工核对 Applications 与备份"
+            if [ -n "$app_installed_id" ] && [ "$(app_path_id "$APP")" = "$app_installed_id" ]; then
+                mv "$APP" "$APP_BACKUP/failed.app" || echo "✗ 新包无法转存,请人工核对 Applications 与备份"
+            else
+                echo "✗ 实际 App 目标已变化,已保留,请人工核对"
+            fi
         fi
         if [ "$app_saved" = "1" ]; then
             if [ ! -e "$APP" ] && [ ! -L "$APP" ]; then
@@ -225,8 +267,8 @@ cat > "$APP_BUILD/Contents/Info.plist" <<EOF
 	<key>CFBundleName</key><string>Claude切换器</string>
 	<key>CFBundleDisplayName</key><string>Claude切换器</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>1.0</string>
-	<key>CFBundleVersion</key><string>1</string>
+	<key>CFBundleShortVersionString</key><string>1.1.0</string>
+	<key>CFBundleVersion</key><string>20261024.9</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>NSHighResolutionCapable</key><true/>
@@ -246,24 +288,40 @@ pkill -x ClaudeSwitcher 2>/dev/null
 if [ -e "$APP" ] || [ -L "$APP" ]; then
     mv "$APP" "$APP_BACKUP/Applications.app" || exit 1
     app_saved=1
+    app_saved_id=$(app_path_id "$APP_BACKUP/Applications.app") || exit 1
 fi
 if { [ -e "$DESKTOP_APP" ] || [ -L "$DESKTOP_APP" ]; } \
     && { [ ! -L "$DESKTOP_APP" ] || [ "$(readlink "$DESKTOP_APP")" != "$APP" ]; }; then
     mv "$DESKTOP_APP" "$APP_BACKUP/Desktop.app" || exit 1
     desktop_saved=1
+    desktop_saved_id=$(app_path_id "$APP_BACKUP/Desktop.app") || exit 1
 fi
 [ ! -e "$APP" ] && [ ! -L "$APP" ] || { echo "✗ 实际 App 目标已变化,停止替换"; exit 1; }
 mv "$APP_BUILD" "$APP" || exit 1
 app_installed=1
+app_installed_id=$(app_path_id "$APP") || exit 1
 if [ ! -L "$DESKTOP_APP" ] || [ "$(readlink "$DESKTOP_APP")" != "$APP" ]; then
     ln -s "$APP" "$DESKTOP_APP" || exit 1
     desktop_created=1
 fi
-if ! codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
+if ! codesign --verify --deep --strict "$APP" >/dev/null 2>&1 \
+    || ! codesign --verify --deep --strict "$DESKTOP_APP" >/dev/null 2>&1 \
+    || [ ! -L "$DESKTOP_APP" ] || [ "$(readlink "$DESKTOP_APP")" != "$APP" ] \
+    || [ "$(app_path_id "$APP")" != "$app_installed_id" ]; then
     echo "✗ 实际 App 验签失败,恢复原包与入口"
     exit 1
 fi
 app_committed=1
+# 新包与桌面入口最终验签后,仅清理本次移出的已核对旧 App/链接。
+app_cleanup_failed=0
+if [ "$app_saved" = "1" ]; then
+    remove_replaced_app "$APP_BACKUP/Applications.app" "$app_saved_id" || app_cleanup_failed=1
+fi
+if [ "$desktop_saved" = "1" ]; then
+    remove_replaced_app "$APP_BACKUP/Desktop.app" "$desktop_saved_id" || app_cleanup_failed=1
+fi
+rmdir "$APP_BACKUP" 2>/dev/null || true
+[ "$app_cleanup_failed" = "0" ] || exit 1
 rm -rf "$APP_BUILD_ROOT"
 trap - EXIT
 echo "✓ App 已安装到 Applications,桌面入口已就绪"

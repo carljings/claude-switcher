@@ -2,6 +2,7 @@
 """Dedicated browser/CLI entries and non-secret configuration audit. No login data access."""
 import argparse
 import datetime
+import hashlib
 import http.client
 import importlib.util
 import json
@@ -17,13 +18,35 @@ from urllib.parse import urlsplit
 EDGE = Path('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge')
 PROFILE_NAME = 'Claude Protected Edge'
 SANDBOX = Path('/usr/bin/sandbox-exec')
+EXTERNAL_CHECKS = {
+    'ippure': ('IPPure', 'https://ippure.com/claude'),
+    'ping0': ('Ping0', 'https://ping0.cc/ip/'),
+}
+FONT_GUARD_HASHES = {
+    'manifest.json': 'a9c60f75a28ea8e6ddc77ca80254bba706f16256af8bb175761894b352672eb0',
+    'font-guard.js': '3bec18a170268ea01a949d2433c5ee66b2c1e0c962075811e30b8a0f061f381c',
+    'LICENSE': '53d05e285330c42c54c2cd5d3c58953eda640379cdcf47a3a53497f5a76f3995',
+}
 DENIED_PERMISSIONS = ('geolocation', 'geolocation_with_options', 'local_fonts', 'media_stream_mic',
                       'media_stream_camera', 'sensors', 'background_sync')
 
 
+def font_guard_path():
+    directory = Path(__file__).with_name('font-guard')
+    if directory.is_symlink() or directory.parent.is_symlink() or ',' in str(directory):
+        raise ValueError('font guard directory is invalid')
+    for name, digest in FONT_GUARD_HASHES.items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError('font guard integrity check failed')
+    return directory
+
+
 def browser_command(profile, url='https://claude.ai/', port=17897):
+    extension = str(font_guard_path())
     return [str(EDGE), '--user-data-dir=' + str(profile), '--profile-directory=Default', '--no-first-run',
-            '--no-default-browser-check', '--lang=en-US', '--accept-lang=en-US,en', '--disable-extensions',
+            '--no-default-browser-check', '--lang=en-US', '--accept-lang=en-US,en',
+            '--disable-extensions-except=' + extension, '--load-extension=' + extension,
             '--proxy-server=http://127.0.0.1:' + str(port),
             '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
             '--webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic', url]
@@ -149,15 +172,15 @@ def running_browser(profile, port=17897):
         found = True
         required = [flag for flag in browser_command(profile, port=port)[2:-1]
                     if flag.startswith(('--profile-directory=', '--lang=', '--proxy-server=',
-                                        '--accept-lang=', '--disable-extensions',
+                                        '--accept-lang=', '--disable-extensions-except=', '--load-extension=',
                                         '--force-webrtc-ip-handling-policy=', '--webrtc-ip-handling-policy=',
                                         '--disable-quic'))]
         for flag in required:
             name = flag.split('=', 1)[0]
-            values = re.findall(r'(?<!\S)' + re.escape(name) + r'(?:=[^\s]+)?(?=\s|$)', command)
-            if values != [flag]:
+            count = len(re.findall(r'(?<!\S)' + re.escape(name) + r'(?==|\s|$)', command))
+            if count != 1 or not re.search(r'(?<!\S)' + re.escape(flag) + r'(?=\s|$)', command):
                 raise ValueError('dedicated browser process baseline mismatch')
-        if re.search(r'(?<!\S)--(?:proxy-bypass-list|proxy-pac-url|proxy-auto-detect|no-proxy-server|load-extension|disable-extensions-except)(?:=|\s|$)', command):
+        if re.search(r'(?<!\S)--(?:proxy-bypass-list|proxy-pac-url|proxy-auto-detect|no-proxy-server|load-component-extension|disable-extensions)(?:=|\s|$)', command):
             raise ValueError('dedicated browser process proxy override')
     return found
 
@@ -317,10 +340,16 @@ def main():
     parser.add_argument('action', choices=['browser', 'check', 'harden', 'cli', 'provider-audit', 'report'])
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    home = Path.home()
-    if args.command and args.action != 'cli':
+    target = None
+    if args.action == 'browser' and args.command:
+        if len(args.command) != 1 or args.command[0] not in EXTERNAL_CHECKS:
+            print('外部检测仅接受固定站点ippure或ping0，不接受网址或其他参数。', file=sys.stderr)
+            return 2
+        target = EXTERNAL_CHECKS[args.command[0]]
+    elif args.command and args.action != 'cli':
         print('此操作不接受附加参数。', file=sys.stderr)
         return 2
+    home = Path.home()
     if args.action == 'report':
         print(str(support_report(home)))
         return 0
@@ -347,6 +376,8 @@ def main():
             return 0
         if not EDGE.is_file():
             raise ValueError('Edge unavailable')
+        failure = '专用字体过滤组件未通过完整性检查，未启动。请修复随切换器安装的font-guard目录。'
+        font_guard_path()
         failure = '专用Edge运行参数未通过检查，未发起打开请求。请先正常关闭专用浏览器窗口，再重试；普通Edge无需关闭。'
         running = running_browser(profile, port)
         failure = '专用浏览器资料未通过检查，未启动。请先关闭专用Edge并显式执行protected-harden；已有资料未被覆盖。'
@@ -354,7 +385,8 @@ def main():
             seed_profile(profile)
         profile_baseline(profile)
         failure = '专用Edge未完成启动，请关闭专用窗口后重试。'
-        process = subprocess.Popen(browser_command(profile, port=port), stdin=subprocess.DEVNULL,
+        url = target[1] if target else 'https://claude.ai/'
+        process = subprocess.Popen(browser_command(profile, url=url, port=port), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    start_new_session=True, close_fds=True,
                                    env=dict(os.environ, LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8',
@@ -364,7 +396,10 @@ def main():
                 raise ValueError('dedicated browser launch failed')
         except subprocess.TimeoutExpired:
             pass  # The directly launched browser is still running.
-        print('已请求打开专用Edge；使用独立资料目录和固定专用代理，请通过官方页面登录。')
+        if target:
+            print('已请求通过专用Edge打开' + target[0] + '外部检测；请在网页查看结果，切换器未读取检测分数。账号权限未验证。')
+        else:
+            print('已请求打开专用Edge；使用固定代理和已校验字体过滤组件，请刷新指定网站核对效果。账号权限未验证。')
         return 0
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError, http.client.HTTPException, subprocess.TimeoutExpired):
         print(failure, file=sys.stderr)

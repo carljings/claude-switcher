@@ -61,6 +61,16 @@ enum AccountEmailLabels {
     }
 }
 
+enum ExternalCheckTarget: String, CaseIterable, Identifiable {
+    case ippure, ping0
+    var id: String { rawValue }
+    var title: String { self == .ippure ? "IPPure · 浏览器环境" : "Ping0 · 出口 IP" }
+    var displayURL: String { self == .ippure ? "ippure.com/claude" : "ping0.cc/ip/" }
+    var summary: String {
+        self == .ippure ? "时区、语言、字体、WebRTC 与 DNS。" : "位置、ASN、IP 类型、风险标签与共享估算。"
+    }
+}
+
 final class VM: ObservableObject {
     @Published var rows: [CheckRow] = [
         CheckRow(name: "代理内核", icon: "cpu"),
@@ -120,11 +130,12 @@ final class VM: ObservableObject {
         if selectedAccount.isEmpty { selectedAccount = ["A", "B"].contains(current) ? current : "A" }
     }
 
-    func openProtectedBrowser() {
+    func openProtectedBrowser(target: ExternalCheckTarget? = nil) {
         guard canRescan else { return }
         isOpeningProtected = true
-        protectedMessage = "正在核对固定出口…"
-        run(["protected-browser"], timeout: 60) { output in
+        protectedMessage = "正在预检专用链路…"
+        let args = ["protected-browser"] + (target.map { [$0.rawValue] } ?? [])
+        run(args, timeout: 60, requireSuccess: true) { output in
             self.protectedMessage = output.isEmpty ? "未取得启动结果，请检查专用入口。" : output
             self.isOpeningProtected = false
         }
@@ -289,6 +300,7 @@ struct ContentView: View {
     @State private var showNotice = false
     @State private var selectedCheck: CheckRow?
     @State private var showFingerprint = false
+    @State private var showExternalChecks = false
     @State private var editedEmailA = ""
     @State private var editedEmailB = ""
     @State private var emailError = ""
@@ -320,6 +332,9 @@ struct ContentView: View {
         .tint(theme.accent)
         .onAppear { vm.refresh() }
         .sheet(isPresented: $vm.isEditingEmails) { emailEditor }
+        .sheet(isPresented: $showExternalChecks) {
+            ExternalChecksView(vm: vm).environment(\.appTheme, theme)
+        }
     }
 
     private func accountEmail(_ account: String) -> String {
@@ -668,12 +683,73 @@ struct ContentView: View {
     }
 
     var footer: some View {
-        HStack {
-            Image(systemName: "lock.shield").font(.caption2)
-            Text("点击检查项查看全文 · 本地通过不代表账号可用").font(.caption2)
-
+        VStack(spacing: 4) {
+            Button { showExternalChecks = true } label: {
+                Label("外部检测", systemImage: "arrow.up.right.square")
+                    .font(.caption).foregroundColor(theme.accent)
+                    .padding(.vertical, 2)
+            }
+            .buttonStyle(.plain).disabled(!vm.canRescan)
+            .help("通过专用浏览器打开第三方环境与出口检测")
+            HStack {
+                Image(systemName: "lock.shield").font(.caption2)
+                Text("点击检查项查看全文 · 本地通过不代表账号可用").font(.caption2)
+            }
+            Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "开发版")")
+                .font(.caption2).monospacedDigit()
         }
         .foregroundColor(theme.secondary)
+    }
+}
+
+struct ExternalChecksView: View {
+    @ObservedObject var vm: VM
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("外部检测").font(.headline)
+                Spacer()
+                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            Text("第三方检测仅供参考；打开后由网站检测出口与浏览器特征。")
+                .font(.caption).foregroundColor(theme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(ExternalCheckTarget.allCases) { target in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(target.title).font(.callout.bold())
+                    Text(target.displayURL).font(.caption2).foregroundColor(theme.secondary)
+                    Text(target.summary).font(.caption).foregroundColor(theme.secondary)
+                    Button { vm.openProtectedBrowser(target: target) } label: {
+                        Label("专用浏览器打开", systemImage: "network.badge.shield.half.filled")
+                            .font(.callout.bold()).padding(.horizontal, 12).padding(.vertical, 8)
+                            .foregroundColor(vm.canRescan ? theme.background : theme.secondary)
+                            .background(vm.canRescan ? theme.accent : theme.button)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain).disabled(!vm.canRescan)
+                    .accessibilityLabel("通过专用浏览器打开\(target.title)")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).padding(14)
+                .background(theme.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.border))
+            }
+            if !vm.protectedMessage.isEmpty {
+                ScrollView {
+                    Text(vm.protectedMessage).font(.caption).textSelection(.enabled)
+                        .foregroundColor(vm.protectedMessage.hasPrefix("FAIL:") ? theme.danger : theme.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 70)
+            }
+            Spacer(minLength: 0)
+            Text("以网页结果为准。").font(.caption2).foregroundColor(theme.secondary)
+        }
+        .padding(20).frame(width: 460, height: 520)
+        .foregroundColor(theme.text).background(theme.background)
+        .preferredColorScheme(theme.colorScheme)
     }
 }
 

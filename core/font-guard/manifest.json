@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Protected Font Guard",
+  "description": "Limits selected local-font measurements on Claude and IPPure. System fonts stay installed.",
+  "version": "0.1.0",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://*.claude.ai/*",
+        "https://claude.com/*",
+        "https://*.claude.com/*",
+        "https://ippure.com/*",
+        "https://www.ippure.com/*"
+      ],
+      "js": [
+        "font-guard.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ]
+}

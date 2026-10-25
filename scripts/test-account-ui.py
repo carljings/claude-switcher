@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory(prefix='switcher-account-ui-') as folder:
     (folder / 'rows').write_text(''.join(key + '=ok:fixture\n' for key in keys))
     (folder / 'status').write_text('current=A hasA=1 hasB=0\n')
     (folder / 'mode').write_text('failure')
+    (folder / 'protected-mode').write_text('success')
     (folder / 'commands').write_text('')
     core = '''#!/bin/bash
 root=__ROOT__
@@ -29,6 +30,14 @@ case "$1" in
  checkdetail) sleep 0.1; cat "$root/rows" ;;
  status) cat "$root/status" ;;
  fix) echo 'FIX:fixture complete' ;;
+ protected-browser)
+   sleep 0.15
+   case "$(cat "$root/protected-mode")" in
+     success) echo "OK:fixture protected ${2:-claude}" ;;
+     failure) echo 'FAIL:fixture protected preflight failed'; exit 1 ;;
+     nonzero-success) echo 'OK:fixture protected opened'; exit 7 ;;
+     empty) exit 0 ;;
+   esac ;;
  switch)
    sleep 0.15
    case "$(cat "$root/mode")" in

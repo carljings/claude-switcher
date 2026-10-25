@@ -49,6 +49,26 @@ swiftc() {
 codesign() {
     [ "$FAILURE" != signing ] || return 1
     if [ "$FAILURE" = final_verify ] && [ "${!#}" = "$H/Applications/Claude切换器.app" ]; then return 1; fi
+    if [ "$FAILURE" = desktop_verify ] && [ "${!#}" = "$H/Desktop/Claude切换器.app" ]; then return 1; fi
+    if [ "${!#}" = "$H/Applications/Claude切换器.app" ]; then
+        case "$FAILURE" in
+            concurrent_application)
+                command rm -rf "$APP"
+                mkdir -p "$APP"
+                printf user-created > "$APP/marker"
+                return 1 ;;
+            cleanup_unknown_directory)
+                command rm -rf "$APP_BACKUP/Applications.app"
+                mkdir -p "$APP_BACKUP/Applications.app"
+                printf user-created > "$APP_BACKUP/Applications.app/marker" ;;
+            cleanup_unknown_link)
+                command rm -rf "$APP_BACKUP/Applications.app"
+                command ln -s "$H/external.app" "$APP_BACKUP/Applications.app" ;;
+            cleanup_changed_identifier)
+                /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier example.unrelated.app' \
+                    "$APP_BACKUP/Applications.app/Contents/Info.plist" ;;
+        esac
+    fi
     return 0
 }
 mv() {
@@ -105,7 +125,7 @@ ln() {
     def test_commit_failures_restore_both_original_bundles(self):
         self.bundle(self.app, 'original-app')
         self.bundle(self.desktop, 'original-desktop')
-        for failure in ['replace', 'link', 'final_verify']:
+        for failure in ['replace', 'link', 'final_verify', 'desktop_verify']:
             with self.subTest(failure=failure):
                 run = self.install(failure)
                 self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -114,18 +134,18 @@ ln() {
                 self.assertFalse(self.desktop.is_symlink())
                 self.assert_no_staging()
 
-    def test_success_preserves_old_bundles_and_installs_desktop_link(self):
+    def test_success_removes_replaced_bundles_and_installs_desktop_link(self):
         self.bundle(self.app, 'original-app')
         self.bundle(self.desktop, 'original-desktop')
         run = self.install()
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual((self.app / 'Contents/MacOS/ClaudeSwitcher').read_text(), 'fixture')
+        info = plistlib.loads((self.app / 'Contents/Info.plist').read_bytes())
+        self.assertEqual(info['CFBundleVersion'], '20261024.9')
+        self.assertEqual(info['CFBundleShortVersionString'], '1.1.0')
         self.assertTrue(self.desktop.is_symlink())
         self.assertEqual(self.desktop.readlink(), self.app)
-        backup = self.backup()
-        self.assertEqual((backup / 'Applications.app/marker').read_text(), 'original-app')
-        self.assertEqual((backup / 'Desktop.app/marker').read_text(), 'original-desktop')
-        self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list((self.home / '.claude-switcher/app-backups').iterdir()), [])
         self.assert_no_staging()
 
     def test_symlink_target_is_not_deleted_or_replaced(self):
@@ -136,8 +156,52 @@ ln() {
         run = self.install()
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual((external / 'marker').read_text(), 'external')
-        self.assertTrue((self.backup() / 'Applications.app').is_symlink())
+        self.assertEqual(list((self.home / '.claude-switcher/app-backups').iterdir()), [])
         self.assertFalse(self.app.is_symlink())
+
+    def test_success_does_not_scan_or_delete_historical_backups(self):
+        historical = self.home / '.claude-switcher/app-backups/earlier/old.app'
+        self.bundle(historical, 'historical')
+        run = self.install()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual((historical / 'marker').read_text(), 'historical')
+        self.assertEqual(list(historical.parent.parent.glob('install.*')), [])
+        self.assert_no_staging()
+
+    def test_cleanup_preserves_changed_backup_identity_or_type(self):
+        for failure in ['cleanup_unknown_directory', 'cleanup_unknown_link', 'cleanup_changed_identifier']:
+            with self.subTest(failure=failure):
+                self.bundle(self.app, 'original-app')
+                external = self.home / 'external.app'
+                self.bundle(external, 'external', 'example.unrelated.app')
+                run = self.install(failure)
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual((self.app / 'Contents/MacOS/ClaudeSwitcher').read_text(), 'fixture')
+                backup = self.backup() / 'Applications.app'
+                if failure == 'cleanup_unknown_link':
+                    self.assertTrue(backup.is_symlink())
+                    self.assertEqual(backup.readlink(), external)
+                else:
+                    self.assertTrue(backup.is_dir())
+                    self.assertEqual((backup / 'marker').read_text(),
+                                     'original-app' if failure == 'cleanup_changed_identifier' else 'user-created')
+                self.assertEqual((external / 'marker').read_text(), 'external')
+                self.assert_no_staging()
+                self.desktop.unlink()
+                shutil.rmtree(self.app)
+                shutil.rmtree(self.home / '.claude-switcher/app-backups')
+                shutil.rmtree(external)
+
+    def test_concurrent_application_is_not_moved_or_overwritten_during_rollback(self):
+        self.bundle(self.app, 'original-app')
+        self.bundle(self.desktop, 'original-desktop')
+        run = self.install('concurrent_application')
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual((self.app / 'marker').read_text(), 'user-created')
+        self.assertEqual((self.desktop / 'marker').read_text(), 'original-desktop')
+        self.assertEqual((self.backup() / 'Applications.app/marker').read_text(), 'original-app')
+        self.assertFalse((self.backup() / 'failed.app').exists())
+        self.assert_no_staging()
 
     def test_concurrent_desktop_target_is_not_overwritten_during_rollback(self):
         self.bundle(self.app, 'original-app')
