@@ -153,7 +153,7 @@ BASE="$HOME/.claude-switcher"
 LOG="$HOME/Library/Logs/claude-switch.log"
 CLASH_DIR="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
 ROUTE_MISSED=""
-case "${1:-}" in expected-exit|network-report|fingerprint|account-note|support-report|protected-check|protected-browser|protected-harden|protected-cli|provider-audit) ;; *) mkdir -p "$BASE/accounts" ;; esac
+case "${1:-}" in expected-exit|network-report|fingerprint|account-note|support-report|protected-check|protected-browser|protected-harden|protected-cli|provider-audit|maintenance-preview|maintenance-apply|maintenance-backups|maintenance-restore-preview|maintenance-recover-preview|switch|_maintenance-switch) ;; *) mkdir -p "$BASE/accounts" ;; esac
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
 
@@ -1006,6 +1006,7 @@ switch_to() {
             return 1
         fi
     done
+    mkdir -p "$BASE/accounts" || { echo "FAIL:无法准备账号存档目录，已停止切换"; return 1; }
 
     # 先准备账号记录;中断或提交失败时保留它,禁止再按旧身份打开或归档。
     if [ "$cur" != "$target" ]; then
@@ -1091,11 +1092,34 @@ case "${1:-}" in
         shift
         exec python3 "$helper" "$action" "$@"
         ;;
+    maintenance-preview|maintenance-apply|maintenance-backups|maintenance-restore-preview|maintenance-recover-preview)
+        helper="$BASE/local-maintenance.py"
+        [ -f "$helper" ] || helper="$(dirname "$0")/local-maintenance.py"
+        case "$1" in maintenance-preview) action=preview ;; maintenance-apply) action=apply ;; maintenance-backups) action=backups ;; maintenance-restore-preview) action=preview-restore ;; *) action=preview-recover ;; esac
+        shift
+        exec python3 "$helper" "$action" "$@"
+        ;;
     fingerprint) fingerprint ;;
     status) status ;;
-    switch) switch_to "${2:-}" ;;
+    switch)
+        case "${2:-}" in A|B) ;; *) echo 'FAIL:账号必须为A或B'; exit 2 ;; esac
+        [ "$#" -eq 2 ] || { echo 'FAIL:账号切换不接受额外参数'; exit 2; }
+        helper="$BASE/local-maintenance.py"
+        [ -f "$helper" ] || helper="$(dirname "$0")/local-maintenance.py"
+        exec python3 "$helper" guard-switch "$2"
+        ;;
+    _maintenance-switch)
+        case "${2:-}" in A|B) ;; *) echo 'FAIL:账号必须为A或B'; exit 2 ;; esac
+        [ "$#" -eq 2 ] || { echo 'FAIL:账号切换不接受额外参数'; exit 2; }
+        helper="$BASE/local-maintenance.py"
+        [ -f "$helper" ] || helper="$(dirname "$0")/local-maintenance.py"
+        if ! python3 "$helper" verify-lock desktop "${CLAUDE_SWITCHER_MAINTENANCE_FD:-}" >/dev/null 2>&1; then
+            echo 'FAIL:资料维护锁或恢复状态未通过检查，请先完成恢复再切换账号'; exit 1
+        fi
+        switch_to "$2"
+        ;;
     set-region) set_region ;;
     update) self_update "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
-    *) echo "用法: claude-switch.sh check|checkdetail|expected-exit|network-report|fix|fingerprint|protected-browser|protected-check|protected-harden|protected-cli|provider-audit|support-report|status|switch A|B|set-region|update [--auto]|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
+    *) echo "用法: claude-switch.sh check|checkdetail|expected-exit|network-report|fix|fingerprint|protected-browser|protected-check|protected-harden|protected-cli|provider-audit|support-report|maintenance-preview MODE|maintenance-apply TOKEN|maintenance-backups|maintenance-restore-preview ID|maintenance-recover-preview ID|status|switch A|B|set-region|update [--auto]|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac

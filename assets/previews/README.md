@@ -2,7 +2,8 @@
 
 | 文件 | 含义 |
 |---|---|
-| `current-main-white.png`、`current-main-black.png` | 当前README使用的20261025.1布局示例：“专用浏览器打开cc web”，IPPure/Ping0直接平铺首界面，版本号在最底部。 |
+| `current-main-white.png`、`current-main-black.png` | 当前README使用的20261025.2布局示例：“专用浏览器打开cc web”，IPPure/Ping0直接平铺首界面，资料维护入口、版本号在最底部。 |
+| `maintenance-preview-*.png`、`maintenance-restore-*.png` | 20261025.2的维护预览与备份恢复页，文件、大小、时间均为隔离示例；不代表实际清理已执行。 |
 | `inline-checks-*.png` | 20261024.10历史发布布局，专用网页按钮尚未改成新名称。 |
 | `external-checks-*.png` | 20261024.9历史布局，外部检测使用弹窗；该交互已由后续版本改为平铺。 |
 | `strict-no-note-*.png` | 20261024.7移除账号状态备注后的历史布局。 |

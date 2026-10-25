@@ -17,9 +17,43 @@ spec.loader.exec_module(access)
 
 class ProtectedAccessTests(unittest.TestCase):
     def setUp(self):
+        isolated_home = tempfile.TemporaryDirectory(prefix='protected-entry-home-')
+        self.addCleanup(isolated_home.cleanup)
+        home_paths = patch.object(access.Path, 'home', return_value=Path(isolated_home.name).resolve())
+        home_paths.start()
+        self.addCleanup(home_paths.stop)
         policy_paths = patch.object(access, 'managed_policy_paths', return_value=[])
         policy_paths.start()
         self.addCleanup(policy_paths.stop)
+
+    def test_pending_maintenance_blocks_entry_before_network_or_profile_changes(self):
+        for action in ['browser', 'harden', 'cli']:
+            argv = ['protected-access.py', action] + (['/fixture/claude'] if action == 'cli' else [])
+            with self.subTest(action=action), patch('sys.argv', argv), \
+                    patch.object(access, 'maintenance_guard', side_effect=ValueError('private-data')) as guard, \
+                    patch.object(access, 'preflight') as preflight, \
+                    patch.object(access, 'seed_profile') as seed, \
+                    patch.object(access, 'harden_profile') as harden, \
+                    patch.object(access, 'launch_cli') as cli, \
+                    patch.object(access.subprocess, 'Popen') as launch, \
+                    contextlib.redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(access.main(), 1)
+                self.assertEqual(guard.call_args.args[1], 'native' if action == 'cli' else 'browser')
+                self.assertEqual(guard.call_args.kwargs['shared'], action == 'cli')
+                preflight.assert_not_called()
+                seed.assert_not_called()
+                harden.assert_not_called()
+                cli.assert_not_called()
+                launch.assert_not_called()
+                self.assertNotIn('private-data', error.getvalue())
+
+    def test_read_only_preflight_does_not_require_a_maintenance_write_lock(self):
+        with patch('sys.argv', ['protected-access.py', 'check']), \
+                patch.object(access, 'maintenance_guard') as guard, \
+                patch.object(access, 'preflight', return_value=17897), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(access.main(), 0)
+            guard.assert_not_called()
 
     def test_browser_command_has_one_proxy_and_separate_profile(self):
         profile = Path('/tmp/private-edge-fixture')
@@ -89,7 +123,7 @@ class ProtectedAccessTests(unittest.TestCase):
         policy = {'mode': 'clash-selector', 'group': 'Fixture',
                   'protected_listener': {'name': 'FixtureProtected', 'port': 17897, 'proxy': 'Fixed'}}
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             (home / '.claude-switcher').mkdir()
             (home / '.claude-switcher/exit-policy.json').write_text(json.dumps(policy))
             module = SimpleNamespace(audit=Mock())
@@ -195,7 +229,7 @@ class ProtectedAccessTests(unittest.TestCase):
     def test_invalid_profile_or_old_process_never_launches_browser(self):
         for failure in ['profile_baseline', 'running_browser']:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
-                home = Path(folder)
+                home = Path(folder).resolve()
                 binary = home / 'edge'
                 binary.touch()
                 with patch('sys.argv', ['protected-access.py', 'browser']), patch.object(access.Path, 'home', return_value=home), patch.object(access, 'EDGE', binary), patch.object(access, 'preflight', return_value=17897), patch.object(access, 'running_browser', return_value=False), patch.object(access, failure, side_effect=ValueError('private-token')), patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()) as error:
@@ -205,7 +239,7 @@ class ProtectedAccessTests(unittest.TestCase):
 
     def test_running_profile_is_not_seeded_and_correct_process_can_be_reused(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             binary = home / 'edge'
             binary.touch()
             profile = home / 'Library/Application Support' / access.PROFILE_NAME
@@ -221,7 +255,7 @@ class ProtectedAccessTests(unittest.TestCase):
         for target, url, label in [('ippure', 'https://ippure.com/claude', 'IPPure'),
                                    ('ping0', 'https://ping0.cc/ip/', 'Ping0')]:
             with self.subTest(target=target), tempfile.TemporaryDirectory() as folder:
-                home = Path(folder)
+                home = Path(folder).resolve()
                 binary = home / 'edge'
                 binary.touch()
                 profile = home / 'Library/Application Support' / access.PROFILE_NAME
@@ -248,7 +282,7 @@ class ProtectedAccessTests(unittest.TestCase):
         for arguments in [['unknown'], ['https://ippure.com/claude'], ['https://ping0.cc/ip/'],
                           ['ippure', 'ping0'], ['--proxy-server=direct://'], ['claude']]:
             with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as folder:
-                home = Path(folder)
+                home = Path(folder).resolve()
                 with patch('sys.argv', ['protected-access.py', 'browser'] + arguments), patch.object(access.Path, 'home', return_value=home), patch.object(access, 'preflight') as preflight, patch.object(access, 'seed_profile') as seed, patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(access.main(), 2)
                     preflight.assert_not_called()
@@ -275,7 +309,7 @@ class ProtectedAccessTests(unittest.TestCase):
 
     def test_new_browser_still_running_is_an_open_request(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             binary = home / 'edge'
             binary.touch()
             with patch.dict(access.os.environ, {'FIXTURE_KEEP': 'fixture-value', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'LC_CTYPE': 'C.UTF-8'}, clear=True), patch('sys.argv', ['protected-access.py', 'browser']), patch.object(access.Path, 'home', return_value=home), patch.object(access, 'EDGE', binary), patch.object(access, 'preflight', return_value=17897), patch.object(access, 'running_browser', return_value=False), patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stdout(io.StringIO()) as output:
@@ -291,7 +325,7 @@ class ProtectedAccessTests(unittest.TestCase):
 
     def test_immediate_browser_failure_is_not_reported_as_opened(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             binary = home / 'edge'
             binary.touch()
             with patch('sys.argv', ['protected-access.py', 'browser']), patch.object(access.Path, 'home', return_value=home), patch.object(access, 'EDGE', binary), patch.object(access, 'preflight', return_value=17897), patch.object(access, 'running_browser', return_value=False), patch.object(access.subprocess, 'Popen') as launch, contextlib.redirect_stderr(io.StringIO()) as error, contextlib.redirect_stdout(io.StringIO()) as output:
@@ -333,7 +367,7 @@ class ProtectedAccessTests(unittest.TestCase):
 
     def test_harden_backs_up_exact_preferences_and_preserves_other_fields(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             profile = home / 'Library/Application Support' / access.PROFILE_NAME
             path = profile / 'Default/Preferences'
             path.parent.mkdir(parents=True)
@@ -353,7 +387,7 @@ class ProtectedAccessTests(unittest.TestCase):
 
     def test_harden_refuses_a_running_profile_without_writing(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             profile = home / 'profile'
             access.seed_profile(profile)
             path = profile / 'Default/Preferences'
@@ -367,7 +401,7 @@ class ProtectedAccessTests(unittest.TestCase):
     def test_harden_failure_or_new_process_preserves_preferences_and_backup(self):
         for failure in ['atomic_write', 'process_started']:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
-                home = Path(folder)
+                home = Path(folder).resolve()
                 profile = home / 'profile'
                 access.seed_profile(profile)
                 path = profile / 'Default/Preferences'
@@ -385,7 +419,7 @@ class ProtectedAccessTests(unittest.TestCase):
     def test_known_managed_policy_conflicts_fail_without_changing_plist(self):
         import plistlib
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             path = home / 'managed.plist'
             for value in [{'ProxySettings': {'ProxyMode': 'direct'}},
                           {'WebRtcIPHandlingUrl': [{'url': '*', 'handling': 'default'}]},
@@ -468,7 +502,7 @@ class ProtectedAccessTests(unittest.TestCase):
 
     def test_audit_reports_presence_without_secret_values(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             p = home / '.claude/settings.json'
             p.parent.mkdir()
             p.write_text(json.dumps({'env': {'ANTHROPIC_AUTH_TOKEN': 'never-print-this', 'ANTHROPIC_BASE_URL': 'https://example.com/api?key=hidden'}}))
@@ -490,7 +524,7 @@ class ProtectedAccessTests(unittest.TestCase):
 
     def test_report_excludes_check_details_and_credentials(self):
         with tempfile.TemporaryDirectory() as folder:
-            home = Path(folder)
+            home = Path(folder).resolve()
             checks = home / '.claude-switcher/last-check.txt'
             checks.parent.mkdir()
             checks.write_text('出口IP=ok:private-ip\n生态可达性=warn:private-session\n')

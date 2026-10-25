@@ -42,6 +42,17 @@ def font_guard_path():
     return directory
 
 
+def maintenance_guard(home, scope, shared=False):
+    path = Path(__file__).with_name('local-maintenance.py')
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('maintenance module unavailable')
+    spec = importlib.util.spec_from_file_location('switcher_maintenance_guard', path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.entry_lock(home, scope, shared=shared)
+
+
 def browser_command(profile, url='https://claude.ai/', port=17897):
     extension = str(font_guard_path())
     return [str(EDGE), '--user-data-dir=' + str(profile), '--profile-directory=Default', '--no-first-run',
@@ -356,8 +367,17 @@ def main():
     if args.action == 'provider-audit':
         print(json.dumps(provider_audit(home), ensure_ascii=False))
         return 0
-    failure = '专用入口预检失败，未启动。请检查Chicago/en-US严格基线、专用代理入口、固定出口及Claude实际目标路由。'
+    gate = None
+    failure = '资料维护模块或恢复状态未通过检查，未启动。请先在资料维护中核对未完成的操作。'
     try:
+        if args.action in ['browser', 'harden', 'cli']:
+            context = maintenance_guard(home, 'native' if args.action == 'cli' else 'browser',
+                                        shared=args.action == 'cli')
+            descriptor = context.__enter__()
+            gate = context
+            if args.action == 'cli':
+                os.set_inheritable(descriptor, True)
+        failure = '专用入口预检失败，未启动。请检查Chicago/en-US严格基线、专用代理入口、固定出口及Claude实际目标路由。'
         port = preflight(home)
         if args.action == 'check':
             print('专用入口固定出口预检通过；未验证账号权限。')
@@ -404,6 +424,9 @@ def main():
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError, http.client.HTTPException, subprocess.TimeoutExpired):
         print(failure, file=sys.stderr)
         return 1
+    finally:
+        if gate is not None:
+            gate.__exit__(None, None, None)
 
 
 if __name__ == '__main__':

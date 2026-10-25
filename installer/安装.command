@@ -111,7 +111,7 @@ echo "✓ 地区自适应: 国家=$CTRY 时区=$TZV 地区格式=$LOCALE (按当
 # ---- 3. 安装文件 ----
 mkdir -p "$H/.local/bin" "$H/.claude-switcher" "$H/Library/Logs"
 cp "$REPO/core/claude-switch.sh" "$H/.local/bin/"
-cp "$REPO/core/stun-probe.py" "$REPO/core/network-audit.py" "$REPO/core/protected-access.py" "$REPO/core/clash-profile-guard.py" "$REPO/core/clash-profile-guard.js" "$H/.claude-switcher/"
+cp "$REPO/core/stun-probe.py" "$REPO/core/network-audit.py" "$REPO/core/protected-access.py" "$REPO/core/local-maintenance.py" "$REPO/core/clash-profile-guard.py" "$REPO/core/clash-profile-guard.js" "$H/.claude-switcher/"
 # 字体组件单独暂存,已有副本先保留,不合并未知文件。
 FONT_GUARD="$H/.claude-switcher/font-guard"
 if [ -L "$FONT_GUARD" ] || { [ -e "$FONT_GUARD" ] && [ ! -d "$FONT_GUARD" ]; }; then
@@ -268,7 +268,7 @@ cat > "$APP_BUILD/Contents/Info.plist" <<EOF
 	<key>CFBundleDisplayName</key><string>Claude切换器</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>1.1.0</string>
-	<key>CFBundleVersion</key><string>20261025.1</string>
+	<key>CFBundleVersion</key><string>20261025.2</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>NSHighResolutionCapable</key><true/>

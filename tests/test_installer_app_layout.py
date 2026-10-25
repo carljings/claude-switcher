@@ -141,7 +141,7 @@ ln() {
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual((self.app / 'Contents/MacOS/ClaudeSwitcher').read_text(), 'fixture')
         info = plistlib.loads((self.app / 'Contents/Info.plist').read_bytes())
-        self.assertEqual(info['CFBundleVersion'], '20261025.1')
+        self.assertEqual(info['CFBundleVersion'], '20261025.2')
         self.assertEqual(info['CFBundleShortVersionString'], '1.1.0')
         self.assertTrue(self.desktop.is_symlink())
         self.assertEqual(self.desktop.readlink(), self.app)

@@ -7,6 +7,7 @@ shasum -a 256 \
     core/network-audit.py \
     core/stun-probe.py \
     core/protected-access.py \
+    core/local-maintenance.py \
     core/clash-profile-guard.py \
     core/clash-profile-guard.js \
     core/font-guard/manifest.json \

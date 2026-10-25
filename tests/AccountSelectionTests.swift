@@ -145,6 +145,174 @@ import SwiftUI
             passed.append("protected browser " + mode + " reports failure without fallback or switch")
         }
 
+        let maintenanceStart = try commands().count
+        let accountBeforeMaintenance = vm.selectedAccount
+        vm.openMaintenance()
+        vm.openMaintenance()
+        vm.refresh()
+        vm.fixAll()
+        vm.inspectDevice()
+        vm.openProtectedBrowser(target: .ippure)
+        vm.confirmOpen()
+        vm.selectAccount("A")
+        assert(vm.isMaintenanceOpen && !vm.canRescan && !vm.canConfirmOpen)
+        assert(vm.selectedAccount == accountBeforeMaintenance && vm.current == "B")
+        let afterMaintenanceOpen = try commands()
+        assert(afterMaintenanceOpen.count == maintenanceStart)
+        passed.append("opening maintenance runs nothing and blocks account and network operations")
+
+        vm.previewMaintenance()
+        vm.previewMaintenance()
+        vm.applyMaintenance()
+        await waitUntil { !vm.maintenanceBusy }
+        assert(vm.maintenancePreview?.mode == .cache && vm.maintenancePreview?.operation == .clean)
+        assert(!vm.maintenanceAcknowledged && !vm.canApplyMaintenance)
+        vm.applyMaintenance()
+        let afterPreview = try commands()
+        assert(Array(afterPreview.dropFirst(maintenanceStart)) == ["maintenance-preview cache"])
+        vm.maintenanceAcknowledged = true
+        assert(vm.canApplyMaintenance)
+        let afterAcknowledgement = try commands()
+        assert(afterAcknowledgement == afterPreview)
+        passed.append("preview and acknowledgement never apply without explicit confirmation")
+        vm.selectMaintenanceMode(.browserReset)
+        assert(vm.maintenancePreview == nil && !vm.maintenanceAcknowledged && !vm.canApplyMaintenance)
+        vm.applyMaintenance()
+        let afterModeChange = try commands()
+        assert(afterModeChange == afterPreview)
+        passed.append("mode changes invalidate the preview token and acknowledgement")
+
+        vm.selectMaintenanceMode(.cache)
+        vm.previewMaintenance()
+        vm.selectMaintenanceMode(.nativeIDs)
+        await waitUntil { !vm.maintenanceBusy }
+        assert(vm.maintenanceMode == .nativeIDs && vm.maintenancePreview == nil && !vm.maintenanceAcknowledged)
+        passed.append("a delayed preview cannot revive a token after the mode changes")
+        for mode in MaintenanceMode.allCases {
+            vm.selectMaintenanceMode(mode)
+            vm.previewMaintenance()
+            await waitUntil { !vm.maintenanceBusy }
+            assert(vm.maintenancePreview?.mode == mode && !vm.maintenanceAcknowledged)
+            let observed = try commands()
+            assert(observed.last == "maintenance-preview " + mode.rawValue)
+            passed.append("maintenance preview dispatches fixed scope " + mode.rawValue)
+        }
+        let beforeApply = try commands()
+        vm.maintenanceAcknowledged = true
+        vm.applyMaintenance()
+        vm.applyMaintenance()
+        vm.closeMaintenance()
+        vm.selectMaintenanceMode(.cache)
+        vm.previewMaintenance()
+        vm.loadMaintenanceBackups()
+        vm.refresh()
+        vm.fixAll()
+        vm.inspectDevice()
+        vm.openProtectedBrowser()
+        vm.confirmOpen()
+        vm.selectAccount("A")
+        assert(vm.isMaintenanceOpen && vm.maintenanceBusy && !vm.canRescan && vm.maintenanceMode == .nativeIDs)
+        await waitUntil { !vm.maintenanceBusy }
+        let afterApply = try commands()
+        assert(Array(afterApply.dropFirst(beforeApply.count)) == ["maintenance-apply " + String(repeating: "d", count: 32)])
+        assert(vm.maintenanceSucceeded && !vm.maintenanceIsError && vm.maintenanceLastBackupID == "fixture-result")
+        assert(vm.maintenancePreview == nil && !vm.maintenanceAcknowledged && vm.current == "B" && vm.selectedAccount == accountBeforeMaintenance)
+        passed.append("confirmed apply sends the exact token once and excludes all competing operations")
+
+        vm.selectMaintenanceMode(.cache)
+        for behavior in ["empty", "bad-json", "plain", "failure", "fail-text", "schema2", "missing-field", "wrong-mode", "unknown-mode", "wrong-operation", "bad-token", "expired", "nonzero-success"] {
+            try write("maintenance-mode", behavior)
+            vm.previewMaintenance()
+            await waitUntil { !vm.maintenanceBusy }
+            assert(vm.maintenanceIsError && !vm.maintenanceSucceeded && vm.maintenancePreview == nil && !vm.maintenanceAcknowledged)
+            assert(vm.maintenanceMode == .cache && !vm.maintenanceMessage.isEmpty)
+            let before = try commands()
+            vm.maintenanceAcknowledged = true
+            vm.applyMaintenance()
+            let after = try commands()
+            assert(after == before)
+            passed.append("maintenance rejects " + behavior + " without losing the selected scope or applying")
+        }
+        try write("maintenance-mode", "no-items")
+        vm.previewMaintenance()
+        await waitUntil { !vm.maintenanceBusy }
+        assert(vm.maintenancePreview?.canApply == false && !vm.maintenanceIsError && !vm.maintenanceSucceeded)
+        vm.maintenanceAcknowledged = true
+        assert(!vm.canApplyMaintenance)
+        let beforeNoItems = try commands()
+        vm.applyMaintenance()
+        let afterNoItems = try commands()
+        assert(afterNoItems == beforeNoItems)
+        passed.append("an empty non-applicable plan is informational and cannot be applied")
+
+        try write("maintenance-mode", "short-expiry")
+        vm.previewMaintenance()
+        await waitUntil { !vm.maintenanceBusy }
+        vm.maintenanceAcknowledged = true
+        assert(vm.canApplyMaintenance)
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        let beforeExpiry = try commands()
+        vm.applyMaintenance()
+        let afterExpiry = try commands()
+        assert(afterExpiry == beforeExpiry && vm.maintenancePreview == nil && !vm.maintenanceAcknowledged && vm.maintenanceIsError)
+        passed.append("expiry at confirmation invalidates the token without an apply request")
+
+        for behavior in ["bad-json", "nonzero-success", "recovery-error"] {
+            try write("maintenance-mode", "success")
+            vm.previewMaintenance()
+            await waitUntil { !vm.maintenanceBusy }
+            try write("maintenance-mode", behavior)
+            vm.maintenanceAcknowledged = true
+            vm.applyMaintenance()
+            await waitUntil { !vm.maintenanceBusy }
+            assert(vm.maintenanceIsError && !vm.maintenanceSucceeded && vm.maintenancePreview == nil && !vm.maintenanceAcknowledged)
+            assert(vm.maintenanceRecoveryRequired == (behavior == "recovery-error"))
+            passed.append("apply " + behavior + " cannot report success and preserves recovery guidance")
+        }
+        try write("maintenance-mode", "success")
+        vm.loadMaintenanceBackups()
+        await waitUntil { !vm.maintenanceBusy }
+        assert(vm.maintenanceBackupsLoaded && vm.maintenanceBackups.count == 2 && vm.maintenancePreview == nil)
+        vm.maintenanceAcknowledged = true
+        let beforeBackupSelection = try commands()
+        vm.selectMaintenanceBackup("fixture-completed")
+        assert(!vm.maintenanceAcknowledged && !vm.canApplyMaintenance)
+        let afterBackupSelection = try commands()
+        assert(afterBackupSelection == beforeBackupSelection)
+        vm.previewMaintenanceRestore()
+        await waitUntil { !vm.maintenanceBusy }
+        assert(vm.maintenancePreview?.operation == .restore && vm.maintenancePreview?.mode == .cache)
+        vm.applyMaintenance()
+        let afterRestorePreview = try commands()
+        assert(Array(afterRestorePreview.dropFirst(beforeBackupSelection.count)) == ["maintenance-restore-preview fixture-completed"])
+        vm.maintenanceAcknowledged = true
+        vm.applyMaintenance()
+        await waitUntil { !vm.maintenanceBusy }
+        let afterRestore = try commands()
+        assert(afterRestore.last == "maintenance-apply " + String(repeating: "e", count: 32) && vm.maintenanceSucceeded)
+        passed.append("backup selection only previews and restoration requires its own acknowledgement and exact token")
+
+        vm.loadMaintenanceBackups()
+        await waitUntil { !vm.maintenanceBusy }
+        vm.selectMaintenanceBackup("fixture-recovery")
+        vm.previewMaintenanceRestore()
+        await waitUntil { !vm.maintenanceBusy }
+        assert(vm.maintenancePreview?.operation == .recover && vm.maintenancePreview?.mode == .browserReset && !vm.maintenanceAcknowledged)
+        let recoveryPreview = try commands()
+        assert(recoveryPreview.last == "maintenance-recover-preview fixture-recovery")
+        vm.maintenanceAcknowledged = true
+        vm.applyMaintenance()
+        await waitUntil { !vm.maintenanceBusy }
+        let afterRecovery = try commands()
+        assert(afterRecovery.last == "maintenance-apply " + String(repeating: "f", count: 32) && vm.maintenanceSucceeded)
+        passed.append("interrupted backups use a separate recover preview and confirmation")
+        vm.closeMaintenance()
+        assert(!vm.isMaintenanceOpen && vm.canRescan && vm.maintenancePreview == nil && !vm.maintenanceAcknowledged)
+        let maintenanceCommands = try commands()
+        assert(maintenanceCommands.dropFirst(maintenanceStart).allSatisfy { $0.hasPrefix("maintenance-") })
+        assert(vm.current == "B" && vm.selectedAccount == accountBeforeMaintenance)
+        passed.append("maintenance and recovery never invoke account operations and closing releases exclusion")
+
         try write("mode", "same-current")
         vm.confirmOpen()
         await waitUntil { vm.phase == .done }

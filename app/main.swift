@@ -71,6 +71,95 @@ enum ExternalCheckTarget: String, CaseIterable, Identifiable {
     }
 }
 
+enum MaintenanceMode: String, CaseIterable, Decodable, Identifiable {
+    case cache, browserReset = "browser-reset", desktopIDs = "desktop-ids", nativeIDs = "native-ids"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .cache: return "清理专用浏览器缓存"
+        case .browserReset: return "重建专用浏览器资料"
+        case .desktopIDs: return "重置 Claude 桌面本地标识"
+        case .nativeIDs: return "重置专用 CLI 本地标识"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .cache: return "仅专用 Edge 缓存白名单；保留 Cookie、密码与登录资料。"
+        case .browserReset: return "备份后重建整个专用 Edge 资料目录，会退出网页登录。"
+        case .desktopIDs: return "仅当前 Claude 的 ant-did 与 registry 文件；不修改 A/B 存档。"
+        case .nativeIDs: return "仅专用 CLI 的本地标识文件和指定 JSON 顶层字段；不修改默认 CLI、OAuth 或钥匙串。"
+        }
+    }
+}
+
+enum MaintenanceOperation: String, Decodable {
+    case clean, restore, recover
+    var title: String {
+        switch self { case .clean: return "维护预览"; case .restore: return "备份恢复预览"; case .recover: return "未完成维护恢复预览" }
+    }
+    var confirmTitle: String { self == .clean ? "确认执行维护" : "确认执行恢复" }
+}
+
+struct MaintenancePreview: Decodable {
+    struct Item: Decodable {
+        let path: String
+        let bytes: Int64
+        let operation: String
+    }
+    let token: String
+    let mode: MaintenanceMode
+    let operation: MaintenanceOperation
+    let scope: String
+    let items: [Item]
+    let itemCount: Int
+    let totalBytes: Int64
+    let impact: String
+    let expiresAt: Double
+    let canApply: Bool
+    enum CodingKeys: String, CodingKey {
+        case token, mode, operation, scope, items, impact
+        case itemCount = "item_count", totalBytes = "total_bytes", expiresAt = "expires_at", canApply = "can_apply"
+    }
+}
+
+struct MaintenanceBackup: Decodable, Identifiable {
+    enum State: String, Decodable { case completed, recoveryRequired = "recovery_required" }
+    let backupID: String
+    let mode: MaintenanceMode
+    let createdAt: Double
+    let label: String
+    let state: State
+    var id: String { backupID }
+    enum CodingKeys: String, CodingKey {
+        case mode, label, state
+        case backupID = "backup_id", createdAt = "created_at"
+    }
+}
+
+private struct MaintenanceHeader: Decodable {
+    let schemaVersion: Int
+    let ok: Bool
+    enum CodingKeys: String, CodingKey { case ok; case schemaVersion = "schema_version" }
+}
+private struct MaintenanceFailure: Decodable {
+    let code: String
+    let message: String
+    let recoveryRequired: Bool
+    enum CodingKeys: String, CodingKey { case code, message; case recoveryRequired = "recovery_required" }
+}
+private struct MaintenanceApplied: Decodable {
+    let mode: MaintenanceMode
+    let operation: MaintenanceOperation
+    let backupID: String
+    let message: String
+    let recoveryRequired: Bool
+    enum CodingKeys: String, CodingKey {
+        case mode, operation, message
+        case backupID = "backup_id", recoveryRequired = "recovery_required"
+    }
+}
+private struct MaintenanceBackupList: Decodable { let backups: [MaintenanceBackup] }
+
 final class VM: ObservableObject {
     @Published var rows: [CheckRow] = [
         CheckRow(name: "代理内核", icon: "cpu"),
@@ -102,10 +191,25 @@ final class VM: ObservableObject {
     @Published var protectedMessage = ""
     @Published var isOpeningProtected = false
     @Published var isEditingEmails = false
+    @Published private(set) var isMaintenanceOpen = false
+    @Published private(set) var maintenanceMode = MaintenanceMode.cache
+    @Published private(set) var maintenancePreview: MaintenancePreview?
+    @Published var maintenanceAcknowledged = false
+    @Published private(set) var maintenanceBusy = false
+    @Published private(set) var maintenanceMessage = ""
+    @Published private(set) var maintenanceIsError = false
+    @Published private(set) var maintenanceSucceeded = false
+    @Published private(set) var maintenanceRecoveryRequired = false
+    @Published private(set) var maintenanceBackups: [MaintenanceBackup] = []
+    @Published private(set) var maintenanceBackupsLoaded = false
+    @Published private(set) var selectedMaintenanceBackup = ""
+    @Published private(set) var maintenanceLastBackupID = ""
+    private var maintenanceGeneration = 0
+    private var maintenanceApplying = false
 
     let core: String
     init(core: String = NSHomeDirectory() + "/.local/bin/claude-switch.sh") { self.core = core }
-    var canRescan: Bool { !isScanning && !isFingerprinting && !isOpeningProtected && !isEditingEmails && phase != .switching && phase != .fixing }
+    var canRescan: Bool { !isScanning && !isFingerprinting && !isOpeningProtected && !isEditingEmails && !isMaintenanceOpen && !maintenanceBusy && phase != .switching && phase != .fixing }
     var canConfirmOpen: Bool {
         phase == .ready && canRescan && ["A", "B"].contains(selectedAccount)
             && rows.allSatisfy { $0.state != .pending && $0.state != .fail }
@@ -151,11 +255,172 @@ final class VM: ObservableObject {
         }
     }
 
+    var canApplyMaintenance: Bool {
+        guard isMaintenanceOpen, !maintenanceBusy, maintenanceAcknowledged, let preview = maintenancePreview else { return false }
+        return preview.canApply && preview.expiresAt > Date().timeIntervalSince1970
+    }
+
+    func openMaintenance() {
+        guard canRescan else { return }
+        isMaintenanceOpen = true
+        invalidateMaintenancePreview()
+    }
+
+    func closeMaintenance() {
+        guard !maintenanceBusy else { return }
+        isMaintenanceOpen = false
+        invalidateMaintenancePreview()
+    }
+
+    private func invalidateMaintenancePreview(_ message: String = "") {
+        maintenanceGeneration += 1
+        maintenancePreview = nil
+        maintenanceAcknowledged = false
+        maintenanceMessage = message
+        maintenanceIsError = false
+        maintenanceSucceeded = false
+        maintenanceRecoveryRequired = false
+        maintenanceLastBackupID = ""
+    }
+
+    func selectMaintenanceMode(_ mode: MaintenanceMode) {
+        guard !maintenanceApplying, mode != maintenanceMode else { return }
+        maintenanceMode = mode
+        selectedMaintenanceBackup = ""
+        invalidateMaintenancePreview("操作已更改，请重新扫描。")
+    }
+
+    func selectMaintenanceBackup(_ backupID: String) {
+        guard !maintenanceApplying, backupID != selectedMaintenanceBackup,
+              backupID.isEmpty || maintenanceBackups.contains(where: { $0.backupID == backupID }) else { return }
+        selectedMaintenanceBackup = backupID
+        invalidateMaintenancePreview("备份已更改，请先预览恢复。")
+    }
+
+    private func failMaintenance(_ message: String, recoveryRequired: Bool = false) {
+        maintenancePreview = nil
+        maintenanceAcknowledged = false
+        maintenanceSucceeded = false
+        maintenanceIsError = true
+        maintenanceRecoveryRequired = recoveryRequired
+        maintenanceMessage = message + " 请重新扫描或刷新备份后核对。"
+    }
+
+    private func decodeMaintenance<T: Decodable>(_ type: T.Type, output: String) -> T? {
+        let data = Data(output.utf8)
+        let decoder = JSONDecoder()
+        guard let header = try? decoder.decode(MaintenanceHeader.self, from: data), header.schemaVersion == 1 else {
+            failMaintenance("未取得可确认的维护结果。")
+            return nil
+        }
+        if !header.ok {
+            if let failure = try? decoder.decode(MaintenanceFailure.self, from: data), !failure.code.isEmpty, !failure.message.isEmpty {
+                failMaintenance(failure.message, recoveryRequired: failure.recoveryRequired)
+            } else { failMaintenance("维护返回了不完整的错误信息。") }
+            return nil
+        }
+        guard let value = try? decoder.decode(type, from: data) else {
+            failMaintenance("维护结果格式不完整，无法确认。")
+            return nil
+        }
+        return value
+    }
+
+    private func requestMaintenancePreview(_ args: [String], mode: MaintenanceMode, operation: MaintenanceOperation) {
+        guard isMaintenanceOpen, !maintenanceBusy else { return }
+        invalidateMaintenancePreview("正在扫描资料范围…")
+        let generation = maintenanceGeneration
+        maintenanceBusy = true
+        run(args, timeout: 90) { output in
+            self.maintenanceBusy = false
+            guard self.isMaintenanceOpen, self.maintenanceGeneration == generation else { return }
+            guard let preview = self.decodeMaintenance(MaintenancePreview.self, output: output) else { return }
+            let tokenValid = preview.token.range(of: "^[0-9a-f]{32}$", options: .regularExpression) != nil
+            guard preview.mode == mode, preview.operation == operation,
+                  !preview.scope.isEmpty, !preview.impact.isEmpty, preview.itemCount == preview.items.count,
+                  preview.totalBytes >= 0, preview.expiresAt.isFinite,
+                  preview.items.allSatisfy({ !$0.path.isEmpty && $0.bytes >= 0 && !$0.operation.isEmpty }),
+                  preview.canApply ? (tokenValid && preview.expiresAt > Date().timeIntervalSince1970 && !preview.items.isEmpty)
+                                   : (preview.token.isEmpty && preview.items.isEmpty && preview.totalBytes == 0) else {
+                self.failMaintenance("预览与所选操作不符、已过期或内容不完整。")
+                return
+            }
+            self.maintenancePreview = preview
+            self.maintenanceMessage = preview.canApply ? "扫描完成；请核对范围和影响后确认。" : "本次没有可执行项目。"
+        }
+    }
+
+    func previewMaintenance() {
+        guard isMaintenanceOpen, !maintenanceBusy else { return }
+        selectedMaintenanceBackup = ""
+        requestMaintenancePreview(["maintenance-preview", maintenanceMode.rawValue], mode: maintenanceMode, operation: .clean)
+    }
+
+    func loadMaintenanceBackups() {
+        guard isMaintenanceOpen, !maintenanceBusy else { return }
+        invalidateMaintenancePreview("正在读取备份列表…")
+        let generation = maintenanceGeneration
+        maintenanceBusy = true
+        run(["maintenance-backups"], timeout: 45) { output in
+            self.maintenanceBusy = false
+            guard self.isMaintenanceOpen, self.maintenanceGeneration == generation else { return }
+            guard let list = self.decodeMaintenance(MaintenanceBackupList.self, output: output) else { return }
+            guard Set(list.backups.map(\.backupID)).count == list.backups.count,
+                  list.backups.allSatisfy({ !$0.backupID.isEmpty && !$0.label.isEmpty && $0.createdAt.isFinite && $0.createdAt > 0 }) else {
+                self.failMaintenance("备份列表不完整，无法确认恢复目标。")
+                return
+            }
+            self.maintenanceBackups = list.backups
+            self.maintenanceBackupsLoaded = true
+            if !list.backups.contains(where: { $0.backupID == self.selectedMaintenanceBackup }) { self.selectedMaintenanceBackup = "" }
+            self.maintenanceMessage = list.backups.isEmpty ? "暂无可恢复备份。" : "请选择备份，再预览恢复范围。"
+        }
+    }
+
+    func previewMaintenanceRestore() {
+        guard let backup = maintenanceBackups.first(where: { $0.backupID == selectedMaintenanceBackup }) else { return }
+        let recovery = backup.state == .recoveryRequired
+        requestMaintenancePreview([recovery ? "maintenance-recover-preview" : "maintenance-restore-preview", backup.backupID],
+                                  mode: backup.mode, operation: recovery ? .recover : .restore)
+    }
+
+    func applyMaintenance() {
+        guard isMaintenanceOpen, !maintenanceBusy else { return }
+        guard canApplyMaintenance, let preview = maintenancePreview else {
+            if let preview = maintenancePreview, preview.canApply && preview.expiresAt <= Date().timeIntervalSince1970 {
+                invalidateMaintenancePreview()
+                failMaintenance("本次预览已过期。")
+            }
+            return
+        }
+        invalidateMaintenancePreview("正在执行已确认的维护…")
+        let generation = maintenanceGeneration
+        maintenanceBusy = true
+        maintenanceApplying = true
+        run(["maintenance-apply", preview.token], timeout: 180) { output in
+            self.maintenanceBusy = false
+            self.maintenanceApplying = false
+            guard self.isMaintenanceOpen, self.maintenanceGeneration == generation else { return }
+            guard let result = self.decodeMaintenance(MaintenanceApplied.self, output: output) else { return }
+            guard result.mode == preview.mode, result.operation == preview.operation, !result.backupID.isEmpty,
+                  !result.message.isEmpty, !result.recoveryRequired else {
+                self.failMaintenance("维护结果与本次确认不符，不能确认完成。", recoveryRequired: result.recoveryRequired)
+                return
+            }
+            self.maintenanceSucceeded = true
+            self.maintenanceMessage = result.message
+            self.maintenanceLastBackupID = result.backupID
+            self.maintenanceBackups = []
+            self.maintenanceBackupsLoaded = false
+            self.selectedMaintenanceBackup = ""
+        }
+    }
+
     func run(_ args: [String], timeout: TimeInterval = 45, requireSuccess: Bool = false, done: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let started = Date()
             let tmp = "/tmp/switcher-out-\(UUID().uuidString).txt"
-            FileManager.default.createFile(atPath: tmp, contents: nil)
+            FileManager.default.createFile(atPath: tmp, contents: nil, attributes: [.posixPermissions: 0o600])
             let p = Process()
             p.launchPath = "/bin/bash"
             p.arguments = [self.core] + args
@@ -178,7 +443,8 @@ final class VM: ObservableObject {
             let data = (try? Data(contentsOf: URL(fileURLWithPath: tmp))) ?? Data()
             let out = String(decoding: data, as: UTF8.self)  // 容错解码:坏字节替换而非整体失败
             try? FileManager.default.removeItem(atPath: tmp)
-            let dbg = "[\(Date())] args=\(args) timedOut=\(timedOut) exit=\(p.terminationStatus) 耗时\(String(format: "%.1f", Date().timeIntervalSince(started)))s stdout=\(out.count)字符\n"
+            let loggedArgs = args.first == "maintenance-apply" ? ["maintenance-apply", "<redacted>"] : args
+            let dbg = "[\(Date())] args=\(loggedArgs) timedOut=\(timedOut) exit=\(p.terminationStatus) 耗时\(String(format: "%.1f", Date().timeIntervalSince(started)))s stdout=\(out.count)字符\n"
             if let h = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/switcher-debug.log")) {
                 h.seekToEndOfFile(); h.write(dbg.data(using: .utf8)!); h.closeFile()
             } else { try? dbg.write(toFile: "/tmp/switcher-debug.log", atomically: true, encoding: .utf8) }
@@ -186,7 +452,9 @@ final class VM: ObservableObject {
                 DispatchQueue.main.async { done("FAIL:操作超时，请重试") }
                 return
             }
-            if requireSuccess && p.terminationStatus != 0 {
+            let maintenanceFailure = args.first?.hasPrefix("maintenance-") == true && p.terminationStatus != 0
+                && (try? JSONDecoder().decode(MaintenanceHeader.self, from: data).ok) != false
+            if (requireSuccess || maintenanceFailure) && p.terminationStatus != 0 {
                 let detail = out.trimmingCharacters(in: .whitespacesAndNewlines)
                 let failure = detail.split(separator: "\n").map(String.init).first { $0.hasPrefix("FAIL:") }
                 let message = failure ?? "FAIL:操作未完成（退出码\(p.terminationStatus)），请重新扫描后重试。"
@@ -332,6 +600,9 @@ struct ContentView: View {
         .tint(theme.accent)
         .onAppear { vm.refresh() }
         .sheet(isPresented: $vm.isEditingEmails) { emailEditor }
+        .sheet(isPresented: Binding(get: { vm.isMaintenanceOpen }, set: { if !$0 { vm.closeMaintenance() } })) {
+            MaintenanceView(vm: vm).environment(\.appTheme, theme)
+        }
     }
 
     private func accountEmail(_ account: String) -> String {
@@ -717,12 +988,146 @@ struct ContentView: View {
         VStack(spacing: 4) {
             HStack {
                 Image(systemName: "lock.shield").font(.caption2)
-                Text("点击检查项查看全文 · 本地通过不代表账号可用").font(.caption2)
+                Text("本地通过不代表账号可用").font(.caption2)
+                Spacer()
+                Button { vm.openMaintenance() } label: {
+                    Label("资料维护", systemImage: "externaldrive").font(.caption2)
+                }
+                .buttonStyle(.plain).disabled(!vm.canRescan)
+                .help("扫描指定资料、确认维护或恢复备份")
             }
             Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "开发版")")
                 .font(.caption2).monospacedDigit()
         }
         .foregroundColor(theme.secondary)
+    }
+}
+
+struct MaintenanceView: View {
+    @ObservedObject var vm: VM
+    @Environment(\.appTheme) private var theme
+
+    private func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+    private func date(_ seconds: Double) -> String {
+        Date(timeIntervalSince1970: seconds).formatted(date: .abbreviated, time: .shortened)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("资料扫描与维护").font(.headline)
+                Spacer()
+                if vm.maintenanceBusy { ProgressView().controlSize(.small) }
+                Button("关闭") { vm.closeMaintenance() }
+                    .keyboardShortcut(.cancelAction).disabled(vm.maintenanceBusy)
+            }
+            Text("先预览范围和影响，再确认执行；只显示文件路径与大小，不显示标识或登录凭据内容。")
+                .font(.caption).foregroundColor(theme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Picker("维护操作", selection: Binding(get: { vm.maintenanceMode }, set: { vm.selectMaintenanceMode($0) })) {
+                    ForEach(MaintenanceMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                .disabled(vm.maintenanceBusy)
+                Button("扫描预览") { vm.previewMaintenance() }.disabled(vm.maintenanceBusy)
+            }
+            Text(vm.maintenanceMode.detail).font(.caption).foregroundColor(theme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider().background(theme.border)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let preview = vm.maintenancePreview {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(preview.operation.title).font(.callout.bold())
+                                Spacer()
+                                Text("\(preview.itemCount) 项 · \(size(preview.totalBytes))").font(.caption).foregroundColor(theme.secondary)
+                            }
+                            Text(preview.scope).font(.callout)
+                            Text(preview.impact).font(.caption).foregroundColor(theme.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !preview.items.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ForEach(Array(preview.items.enumerated()), id: \.offset) { _, item in
+                                        HStack(alignment: .top) {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(item.path).textSelection(.enabled)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                                Text(item.operation).foregroundColor(theme.secondary)
+                                            }
+                                            Spacer()
+                                            Text(size(item.bytes)).foregroundColor(theme.secondary)
+                                        }
+                                        .font(.caption)
+                                    }
+                                }
+                                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(theme.surface).clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                            if preview.canApply {
+                                Text("预览有效至 \(date(preview.expiresAt))；过期后需要重新扫描。")
+                                    .font(.caption2).foregroundColor(theme.secondary)
+                            }
+                        }
+                    } else {
+                        Text("选择操作后点击“扫描预览”。扫描只生成清单，不执行维护。")
+                            .font(.callout).foregroundColor(theme.secondary)
+                    }
+                    if !vm.maintenanceMessage.isEmpty {
+                        Text(vm.maintenanceMessage).font(.callout).textSelection(.enabled)
+                            .foregroundColor(vm.maintenanceIsError ? theme.danger : (vm.maintenanceSucceeded ? theme.success : theme.secondary))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if vm.maintenanceRecoveryRequired {
+                        Text("存在需要恢复的维护记录。请刷新备份，选择待恢复记录并预览恢复范围。")
+                            .font(.caption).foregroundColor(theme.warning)
+                    }
+                    if !vm.maintenanceLastBackupID.isEmpty {
+                        Text("本次备份信息已记录；可刷新下方列表核对可恢复记录。")
+                            .font(.caption).foregroundColor(theme.secondary)
+                    }
+                    Divider().background(theme.border)
+                    HStack {
+                        Text("备份恢复").font(.callout.bold())
+                        Spacer()
+                        Button("刷新备份") { vm.loadMaintenanceBackups() }.disabled(vm.maintenanceBusy)
+                    }
+                    if vm.maintenanceBackups.isEmpty {
+                        Text(vm.maintenanceBackupsLoaded ? "暂无可恢复备份。" : "刷新列表后，选择备份并单独预览恢复。")
+                            .font(.caption).foregroundColor(theme.secondary)
+                    } else {
+                        HStack {
+                            Picker("备份", selection: Binding(get: { vm.selectedMaintenanceBackup }, set: { vm.selectMaintenanceBackup($0) })) {
+                                Text("请选择备份").tag("")
+                                ForEach(vm.maintenanceBackups) { backup in
+                                    Text("\(backup.label) · \(date(backup.createdAt))\(backup.state == .recoveryRequired ? " · 待恢复" : "")")
+                                        .tag(backup.backupID)
+                                }
+                            }
+                            Button("预览恢复") { vm.previewMaintenanceRestore() }
+                                .disabled(vm.selectedMaintenanceBackup.isEmpty || vm.maintenanceBusy)
+                        }
+                        .disabled(vm.maintenanceBusy)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Divider().background(theme.border)
+            Toggle("我已完全退出相关应用，并理解本次预览列出的影响。", isOn: $vm.maintenanceAcknowledged)
+                .toggleStyle(.checkbox).font(.caption)
+                .disabled(vm.maintenancePreview?.canApply != true || vm.maintenanceBusy)
+            HStack {
+                Text("更换操作或备份后，需要重新预览和确认。")
+                    .font(.caption2).foregroundColor(theme.secondary)
+                Spacer()
+                Button(vm.maintenancePreview?.operation.confirmTitle ?? "确认执行维护") { vm.applyMaintenance() }
+                    .disabled(!vm.canApplyMaintenance)
+            }
+        }
+        .padding(20).frame(width: 600, height: 680)
+        .foregroundColor(theme.text).background(theme.background)
+        .preferredColorScheme(theme.colorScheme)
+        .interactiveDismissDisabled(vm.maintenanceBusy)
     }
 }
 

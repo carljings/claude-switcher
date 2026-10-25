@@ -4,7 +4,7 @@
 
 **本地环境检查与桌面账号切换 —— 在启动前发现配置与连接问题**
 
-> 当前macOS定制界面版本：**20261025.1**。请查看[`custom/strict-macos`分支](https://github.com/carljings/claude-switcher/tree/custom/strict-macos)；仓库默认`main`仍保留旧版内容。
+> 当前macOS定制界面版本：**20261025.2**。请查看[`custom/strict-macos`分支](https://github.com/carljings/claude-switcher/tree/custom/strict-macos)；仓库默认`main`仍保留旧版内容。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS-blue.svg)]()
@@ -27,6 +27,8 @@
 专用浏览器现可加载[最小字体过滤组件](docs/PLUGIN-FONT-GUARD.md)，仅作用于指定Claude/IPPure站点，保留系统字体、真实UA和固定代理；主界面最底部显示实际构建版本。
 
 [外部检测](docs/EXTERNAL-CHECKS.md)在主窗口平铺IPPure与Ping0用途总结及专用浏览器跳转，每次沿用严格预检，网页结果由用户查看。Claude网页入口为“专用浏览器打开cc web”，不随A/B选择切换网页账号。重装或升级验证成功后清理本次替换的旧App，固定实际路径为`~/Applications/Claude切换器.app`，桌面为该路径的链接；加入程序坞时也应选择该实际App。
+
+[资料扫描与维护](docs/LOCAL-MAINTENANCE.md)提供专用Edge缓存清理、资料重建，以及当前桌面/预置独立CLI本地ID重置。先预览固定清单和影响，确认后保存私有备份；恢复也先预览。没有目标不表示所有指纹已清除，真实资料不会因扫描、安装或更新自动清理。
 
 专用链路需要另行配置私有固定出口策略、具体节点和loopback listener；源码及安装包不携带用户的节点、服务器、账号或凭据。[本机网络架构与脱敏示例](docs/NETWORK-ARCHITECTURE.md)用于说明已有部署，不表示安装后自带三节点或VPS。
 
@@ -113,9 +115,9 @@ root时区看门狗按已配置目标恢复时区。时区、地区格式与英�
 
 | 白色 | 黑色 |
 |---|---|
-| ![20261025.1白色主界面示例](assets/previews/current-main-white.png) | ![20261025.1黑色主界面示例](assets/previews/current-main-black.png) |
+| ![20261025.2白色主界面示例](assets/previews/current-main-white.png) | ![20261025.2黑色主界面示例](assets/previews/current-main-black.png) |
 
-两图**基于20261025.1生产视图和隔离示例数据，非实时网络或账号证明**：IP使用保留测试地址，邮箱使用`example.com`，没有读取真实账号资料。所用生产视图源码SHA256为`341047650a547d9338c5edbaedd46e4a0c79c3b2078297860b8a7ddeaeb28e9b`。首屏展示14项检查、A/B两步确认、cc web入口和外部检测；底部显示实际构建号，账号状态备注已移除。旧版本截图保留作历史资料。
+两图**基于20261025.2生产视图和隔离示例数据，非实时网络或账号证明**：IP使用保留测试地址，邮箱使用`example.com`，没有读取真实账号资料。所用生产视图源码SHA256为`28707582d6e8b2479e1394ae32e33434d491d2e92ad4660db088d2c2da422e81`。首屏展示14项检查、A/B两步确认、cc web入口、外部检测和资料维护；底部显示实际构建号，账号状态备注已移除。旧版本截图保留作历史资料。
 
 界面为原生SwiftUI单文件应用，无Xcode工程；安装时需要`swiftc`和系统框架。仓库包含图标PNG、图标生成源码及界面预览素材。
 
@@ -202,6 +204,7 @@ bash core/claude-switch.sh diagnose-proxy --proxy http://127.0.0.1:18080
 │   ├── stun-probe.py       # STUN UDP探针
 │   ├── network-audit.py    # 实际路由/固定出口/有限桌面守护判定
 │   ├── protected-access.py # 专用Edge/CLI预检、配置审计与本地报告
+│   ├── local-maintenance.py # 固定范围扫描、私有备份、维护及恢复
 │   ├── clash-profile-guard.py / .js # 订阅末尾脚本核对与修复
 │   └── font-guard/         # 指定站点字体测量组件及MIT许可
 ├── windows/                # Windows 版(PowerShell 核心 + WPF 界面, Beta)
@@ -215,7 +218,7 @@ bash core/claude-switch.sh diagnose-proxy --proxy http://127.0.0.1:18080
 └── assets/                 # 图标、当前及历史预览、脱敏网络示意
 ```
 
-用户态配套模块安装于`~/.claude-switcher/`。root守护仅使用`/Library/Application Support/claude-switcher/`中的root所有脚本和`network-audit.py`；`protected-access.py`、订阅脚本与字体组件不装入root目录。两层副本需分别验证，不能用用户态更新替代root模块的显式安装。
+用户态配套模块安装于`~/.claude-switcher/`。root守护仅使用`/Library/Application Support/claude-switcher/`中的root所有脚本和`network-audit.py`；`protected-access.py`、`local-maintenance.py`、订阅脚本与字体组件不装入root目录。两层副本需分别验证，不能用用户态更新替代root模块的显式安装。
 
 ## 二改指南
 
@@ -240,6 +243,7 @@ bash core/claude-switch.sh diagnose-proxy --proxy http://127.0.0.1:18080
 - [x] macOS 14项检查、A/B确认与快照故障保护、有限桌面守护
 - [x] 专用Edge／CLI固定链路、指定站点字体测量过滤、首屏外部检测入口
 - [x] 原生黑白界面、完整详情、底部构建号、成功重装清理本次旧App
+- [x] 固定范围资料扫描、缓存/资料/本地ID分级维护、备份恢复及中断恢复
 - [x] 静态Web检测源码；Windows／Linux各自Beta实现保留
 - [ ] Edge升级、休眠／切网、全部DNS/WebRTC/WSS及已认证CLI工具的进一步兼容验证
 - [ ] Windows／Linux的独立真机回归，不能沿用macOS验收结论
