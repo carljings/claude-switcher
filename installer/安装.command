@@ -268,7 +268,7 @@ cat > "$APP_BUILD/Contents/Info.plist" <<EOF
 	<key>CFBundleDisplayName</key><string>Claude切换器</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>1.1.0</string>
-	<key>CFBundleVersion</key><string>20261024.9</string>
+	<key>CFBundleVersion</key><string>20261024.10</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>NSHighResolutionCapable</key><true/>

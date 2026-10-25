@@ -300,7 +300,6 @@ struct ContentView: View {
     @State private var showNotice = false
     @State private var selectedCheck: CheckRow?
     @State private var showFingerprint = false
-    @State private var showExternalChecks = false
     @State private var editedEmailA = ""
     @State private var editedEmailB = ""
     @State private var emailError = ""
@@ -312,7 +311,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             theme.background.ignoresSafeArea()
-            VStack(spacing: 16) {
+            VStack(spacing: 8) {
                 header
                 scanControls
                 checksCard
@@ -321,10 +320,11 @@ struct ContentView: View {
                 } else if vm.phase == .failed || vm.phase == .openFailed || vm.phase == .fixing {
                     retryCard
                 }
+                externalChecks
                 Spacer(minLength: 0)
                 footer
             }
-            .padding(20)
+            .padding(.horizontal, 20).padding(.vertical, 12)
         }
         .frame(width: 440, height: 860)
         .environment(\.appTheme, theme)
@@ -332,9 +332,6 @@ struct ContentView: View {
         .tint(theme.accent)
         .onAppear { vm.refresh() }
         .sheet(isPresented: $vm.isEditingEmails) { emailEditor }
-        .sheet(isPresented: $showExternalChecks) {
-            ExternalChecksView(vm: vm).environment(\.appTheme, theme)
-        }
     }
 
     private func accountEmail(_ account: String) -> String {
@@ -544,7 +541,7 @@ struct ContentView: View {
     }
 
     var accountCard: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 8) {
             if vm.phase == .switching {
                 HStack(spacing: 8) {
                     ProgressView().scaleEffect(0.7)
@@ -574,10 +571,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain).disabled(!vm.canRescan)
                     .help("独立Edge资料目录，固定本机代理；需要官方登录")
-                }
-                if !vm.protectedMessage.isEmpty {
-                    Text(vm.protectedMessage).font(.caption2).foregroundColor(theme.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 HStack(spacing: 10) {
                     accountButton("A", subtitle: vm.current == "A" ? "当前档案" : (vm.hasA ? "已建档" : "首次使用 · 需登录"))
@@ -682,15 +675,46 @@ struct ContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.danger.opacity(0.5)))
     }
 
+    var externalChecks: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                ForEach(ExternalCheckTarget.allCases) { target in
+                    Button { vm.openProtectedBrowser(target: target) } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(target.title).font(.caption.bold())
+                                Spacer(minLength: 0)
+                                Image(systemName: "arrow.up.right.square").font(.caption2)
+                            }
+                            .foregroundColor(theme.accent)
+                            Text(target == .ippure ? "时区/语言/字体/WebRTC/DNS" : "位置/ASN/类型/风险/共享估算")
+                                .font(.caption2).foregroundColor(theme.secondary).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .background(theme.surface).clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.border))
+                        .opacity(vm.canRescan ? 1 : 0.5)
+                    }
+                    .buttonStyle(.plain).disabled(!vm.canRescan)
+                    .help("专用浏览器打开 \(target.displayURL)；\(target.summary)")
+                    .accessibilityLabel("通过专用浏览器打开\(target.title)")
+                }
+            }
+            ScrollView {
+                Text(vm.protectedMessage.isEmpty ? "外部检测 · 专用浏览器打开，第三方结果仅供参考。" : vm.protectedMessage)
+                    .font(.caption2).textSelection(.enabled)
+                    .foregroundColor(vm.protectedMessage.hasPrefix("FAIL:") ? theme.danger : theme.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(height: 24)
+            .help(vm.protectedMessage)
+        }
+    }
+
     var footer: some View {
         VStack(spacing: 4) {
-            Button { showExternalChecks = true } label: {
-                Label("外部检测", systemImage: "arrow.up.right.square")
-                    .font(.caption).foregroundColor(theme.accent)
-                    .padding(.vertical, 2)
-            }
-            .buttonStyle(.plain).disabled(!vm.canRescan)
-            .help("通过专用浏览器打开第三方环境与出口检测")
             HStack {
                 Image(systemName: "lock.shield").font(.caption2)
                 Text("点击检查项查看全文 · 本地通过不代表账号可用").font(.caption2)
@@ -699,57 +723,6 @@ struct ContentView: View {
                 .font(.caption2).monospacedDigit()
         }
         .foregroundColor(theme.secondary)
-    }
-}
-
-struct ExternalChecksView: View {
-    @ObservedObject var vm: VM
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.appTheme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("外部检测").font(.headline)
-                Spacer()
-                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-            Text("第三方检测仅供参考；打开后由网站检测出口与浏览器特征。")
-                .font(.caption).foregroundColor(theme.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            ForEach(ExternalCheckTarget.allCases) { target in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(target.title).font(.callout.bold())
-                    Text(target.displayURL).font(.caption2).foregroundColor(theme.secondary)
-                    Text(target.summary).font(.caption).foregroundColor(theme.secondary)
-                    Button { vm.openProtectedBrowser(target: target) } label: {
-                        Label("专用浏览器打开", systemImage: "network.badge.shield.half.filled")
-                            .font(.callout.bold()).padding(.horizontal, 12).padding(.vertical, 8)
-                            .foregroundColor(vm.canRescan ? theme.background : theme.secondary)
-                            .background(vm.canRescan ? theme.accent : theme.button)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain).disabled(!vm.canRescan)
-                    .accessibilityLabel("通过专用浏览器打开\(target.title)")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading).padding(14)
-                .background(theme.surface).clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.border))
-            }
-            if !vm.protectedMessage.isEmpty {
-                ScrollView {
-                    Text(vm.protectedMessage).font(.caption).textSelection(.enabled)
-                        .foregroundColor(vm.protectedMessage.hasPrefix("FAIL:") ? theme.danger : theme.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 70)
-            }
-            Spacer(minLength: 0)
-            Text("以网页结果为准。").font(.caption2).foregroundColor(theme.secondary)
-        }
-        .padding(20).frame(width: 460, height: 520)
-        .foregroundColor(theme.text).background(theme.background)
-        .preferredColorScheme(theme.colorScheme)
     }
 }
 
