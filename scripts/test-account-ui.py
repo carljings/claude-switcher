@@ -23,6 +23,8 @@ with tempfile.TemporaryDirectory(prefix='switcher-account-ui-') as folder:
     (folder / 'status').write_text('current=A hasA=1 hasB=0\n')
     (folder / 'mode').write_text('failure')
     (folder / 'protected-mode').write_text('success')
+    (folder / 'check-mode').write_text('success')
+    (folder / 'status-mode').write_text('success')
     (folder / 'maintenance-mode').write_text('success')
     (folder / 'commands').write_text('')
     (folder / 'maintenance-fixture.py').write_text('''import json
@@ -90,8 +92,29 @@ sys.exit(7 if behavior == 'nonzero-success' else 0)
 root=__ROOT__
 echo "$*" >> "$root/commands"
 case "$1" in
- checkdetail) sleep 0.1; cat "$root/rows" ;;
- status) cat "$root/status" ;;
+ checkdetail)
+   sleep 0.1
+   if [ "$(cat "$root/check-mode")" = empty-state ]; then
+     sed 's/^IPv6=.*/IPv6=:ok/' "$root/rows"
+   else
+     cat "$root/rows"
+   fi
+   case "$(cat "$root/check-mode")" in
+     nonzero-complete) exit 7 ;;
+     failure-line) echo 'FAIL:fixture scan failed after output' ;;
+     duplicate) head -1 "$root/rows" ;;
+   esac ;;
+ status)
+   case "$(cat "$root/status-mode")" in
+     empty) exit 0 ;;
+     missing-field) echo 'current=A hasA=1' ;;
+     duplicate) echo 'current=A current=B hasA=1 hasB=0' ;;
+     invalid-value) echo 'current=A hasA=invalid hasB=0' ;;
+     nonzero-complete) cat "$root/status"; exit 7 ;;
+     *) cat "$root/status" ;;
+   esac ;;
+ runner-fast) echo 'OK:fixture immediate exit' ;;
+ runner-timeout) exec sleep 2 ;;
  fix) echo 'FIX:fixture complete' ;;
  maintenance-preview|maintenance-apply|maintenance-backups|maintenance-restore-preview|maintenance-recover-preview)
    sleep 0.15
@@ -119,7 +142,7 @@ esac
 '''.replace('__ROOT__', shlex.quote(str(folder)))
     (folder / 'core.sh').write_text(core)
     (folder / 'core.sh').chmod(0o700)
-    command = ['swiftc', '-parse-as-library', '-target', platform.machine() + '-apple-macos13.0',
+    command = ['swiftc', '-parse-as-library', '-warnings-as-errors', '-target', platform.machine() + '-apple-macos13.0',
                '-sdk', sdk, '-framework', 'SwiftUI', '-framework', 'AppKit',
                str(folder / 'Model.swift'), str(repo / 'tests/AccountSelectionTests.swift'),
                '-o', str(folder / 'account-ui-tests')]

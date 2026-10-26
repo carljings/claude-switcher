@@ -40,6 +40,61 @@ import SwiftUI
         assert(vm.phase == .ready && vm.current == "A" && vm.selectedAccount == "A")
         assert(vm.hasA && !vm.hasB)
         passed.append("initial selection follows current profile")
+        for mode in ["nonzero-complete", "failure-line", "duplicate", "empty-state"] {
+            try write("check-mode", mode)
+            vm.refresh()
+            await waitUntil { !vm.isScanning }
+            assert(vm.phase == .failed && !vm.canConfirmOpen,
+                   "Complete output must not hide scan failure: " + mode)
+            if mode == "empty-state" {
+                assert(vm.rows.first { $0.name == "Wi-Fi IPv6" }?.state == .fail)
+            } else { assert(!vm.banner.isEmpty) }
+            assert(vm.selectedAccount == "A")
+            passed.append("scan rejects " + mode + " while preserving selection")
+        }
+        try write("check-mode", "success")
+        for mode in ["nonzero-complete", "empty", "missing-field", "duplicate", "invalid-value"] {
+            try write("status-mode", mode)
+            vm.refresh()
+            await waitUntil { !vm.isScanning }
+            assert(vm.phase == .failed && !vm.canConfirmOpen && !vm.banner.isEmpty,
+                   "Invalid account status must block readiness: " + mode)
+            assert(vm.current == "未知" && vm.selectedAccount == "A")
+            passed.append("status rejects " + mode + " without guessing a profile")
+        }
+        try write("check-mode", "failure-line")
+        try write("status-mode", "empty")
+        vm.refresh()
+        await waitUntil { !vm.isScanning }
+        assert(vm.banner.contains("fixture scan failed after output"))
+        passed.append("status failure preserves the original scan reason")
+        try write("check-mode", "success")
+        try write("status-mode", "success")
+        vm.refresh()
+        await waitUntil { !vm.isScanning }
+        assert(vm.phase == .ready && vm.current == "A")
+        let absent = VM(core: root + "/missing-core.sh")
+        absent.refresh()
+        await waitUntil { !absent.isScanning }
+        assert(absent.phase == .failed && absent.rows.allSatisfy { $0.state == .fail })
+        assert(absent.banner.contains("核心脚本"))
+        passed.append("missing core fails clearly without leaving pending rows")
+        var callbacks = 0
+        var runnerOutput = ""
+        vm.run(["runner-fast"], timeout: 0.15, requireSuccess: true) { output in
+            callbacks += 1; runnerOutput = output
+        }
+        await waitUntil { callbacks == 1 }
+        assert(runnerOutput == "OK:fixture immediate exit")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        assert(callbacks == 1)
+        passed.append("an immediate exit completes once without a late timeout")
+        vm.run(["runner-timeout"], timeout: 0.1, requireSuccess: true) { output in
+            callbacks += 1; runnerOutput = output
+        }
+        await waitUntil { callbacks == 2 }
+        assert(runnerOutput.hasPrefix("FAIL:") && runnerOutput.contains("超时"))
+        passed.append("deadline reports timeout instead of empty success")
         let beforeSelection = try commands()
         vm.selectAccount("B")
         vm.selectAccount("A")

@@ -13,6 +13,25 @@ struct CheckRow: Identifiable {
     var detail: String = ""
 }
 
+private final class ProcessDeadline {
+    private let lock = NSLock()
+    private var expired = false
+
+    func expire(_ process: Process) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard process.isRunning else { return }
+        expired = true
+        process.terminate()
+    }
+
+    var timedOut: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return expired
+    }
+}
+
 enum Phase { case checking, ready, failed, openFailed, switching, done, fixing }
 
 enum AppTheme: String, CaseIterable {
@@ -226,12 +245,27 @@ final class VM: ObservableObject {
         selectedAccount = target
     }
 
-    private func applyAccountStatus(_ output: String) {
+    @discardableResult private func applyAccountStatus(_ output: String) -> Bool {
         let fields = output.split(whereSeparator: \.isWhitespace).map(String.init)
-        current = fields.contains("current=B") ? "B" : (fields.contains("current=A") ? "A" : "未初始化")
-        hasA = fields.contains("hasA=1")
-        hasB = fields.contains("hasB=1")
+        var values: [String: String] = [:]
+        var valid = !fields.isEmpty
+        for field in fields {
+            let pair = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            guard pair.count == 2 else { valid = false; break }
+            if ["current", "hasA", "hasB"].contains(pair[0]) {
+                if values.updateValue(pair[1], forKey: pair[0]) != nil { valid = false }
+            }
+        }
+        guard valid, let account = values["current"], ["A", "B", "none"].contains(account),
+              let a = values["hasA"], let b = values["hasB"], ["0", "1"].contains(a), ["0", "1"].contains(b) else {
+            current = "未知"; hasA = false; hasB = false
+            return false
+        }
+        current = account == "none" ? "未初始化" : account
+        hasA = a == "1"
+        hasB = b == "1"
         if selectedAccount.isEmpty { selectedAccount = ["A", "B"].contains(current) ? current : "A" }
+        return true
     }
 
     func openProtectedBrowser(target: ExternalCheckTarget? = nil) {
@@ -418,37 +452,43 @@ final class VM: ObservableObject {
 
     func run(_ args: [String], timeout: TimeInterval = 45, requireSuccess: Bool = false, done: @escaping (String) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let started = Date()
-            let tmp = "/tmp/switcher-out-\(UUID().uuidString).txt"
-            FileManager.default.createFile(atPath: tmp, contents: nil, attributes: [.posixPermissions: 0o600])
+            var directory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: self.core, isDirectory: &directory), !directory.boolValue,
+                  FileManager.default.isReadableFile(atPath: self.core) else {
+                DispatchQueue.main.async { done("FAIL:核心脚本缺失或不可读，请按定制仓库安装说明修复后重新扫描。") }
+                return
+            }
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("switcher-out-\(UUID().uuidString).txt")
+            guard FileManager.default.createFile(atPath: tmp.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                DispatchQueue.main.async { done("FAIL:无法创建检查输出文件，已停止操作。") }
+                return
+            }
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            guard let fh = try? FileHandle(forWritingTo: tmp) else {
+                DispatchQueue.main.async { done("FAIL:无法打开检查输出文件，已停止操作。") }
+                return
+            }
+            defer { try? fh.close() }
             let p = Process()
-            p.launchPath = "/bin/bash"
+            p.executableURL = URL(fileURLWithPath: "/bin/bash")
             p.arguments = [self.core] + args
-            if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: tmp)) {
-                p.standardOutput = fh
-                p.standardError = fh
-            }
-            var timedOut = false
-            let watchdog = DispatchWorkItem {
-                if p.isRunning { timedOut = true; p.terminate() }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+            p.standardOutput = fh
+            p.standardError = fh
             do { try p.run() } catch {
                 DispatchQueue.main.async { done("FAIL:无法启动脚本 \(error.localizedDescription)") }
                 return
             }
+            let deadline = ProcessDeadline()
+            let watchdog = DispatchWorkItem { deadline.expire(p) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
             p.waitUntilExit()
             watchdog.cancel()
-            if let fh = p.standardOutput as? FileHandle { try? fh.close() }
-            let data = (try? Data(contentsOf: URL(fileURLWithPath: tmp))) ?? Data()
+            guard let data = try? Data(contentsOf: tmp) else {
+                DispatchQueue.main.async { done("FAIL:无法读取本次操作结果，请重新扫描。") }
+                return
+            }
             let out = String(decoding: data, as: UTF8.self)  // 容错解码:坏字节替换而非整体失败
-            try? FileManager.default.removeItem(atPath: tmp)
-            let loggedArgs = args.first == "maintenance-apply" ? ["maintenance-apply", "<redacted>"] : args
-            let dbg = "[\(Date())] args=\(loggedArgs) timedOut=\(timedOut) exit=\(p.terminationStatus) 耗时\(String(format: "%.1f", Date().timeIntervalSince(started)))s stdout=\(out.count)字符\n"
-            if let h = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/switcher-debug.log")) {
-                h.seekToEndOfFile(); h.write(dbg.data(using: .utf8)!); h.closeFile()
-            } else { try? dbg.write(toFile: "/tmp/switcher-debug.log", atomically: true, encoding: .utf8) }
-            if timedOut {
+            if deadline.timedOut {
                 DispatchQueue.main.async { done("FAIL:操作超时，请重试") }
                 return
             }
@@ -457,7 +497,8 @@ final class VM: ObservableObject {
             if (requireSuccess || maintenanceFailure) && p.terminationStatus != 0 {
                 let detail = out.trimmingCharacters(in: .whitespacesAndNewlines)
                 let failure = detail.split(separator: "\n").map(String.init).first { $0.hasPrefix("FAIL:") }
-                let message = failure ?? "FAIL:操作未完成（退出码\(p.terminationStatus)），请重新扫描后重试。"
+                let reason = failure ?? "FAIL:核心脚本执行失败（退出码\(p.terminationStatus)），请重新扫描后重试。"
+                let message = detail.hasPrefix(reason) ? detail : reason + (detail.isEmpty ? "" : "\n" + detail)
                 DispatchQueue.main.async { done(message) }
                 return
             }
@@ -472,9 +513,11 @@ final class VM: ObservableObject {
         banner = ""
         note = ""
         for i in rows.indices { rows[i].state = .pending; rows[i].detail = "" }
-        run(["checkdetail"]) { out in
+        run(["checkdetail"], requireSuccess: true) { out in
             // 每次扫描只接受本次输出,不复用磁盘上的旧结果。
-            var allOk = true
+            let failure = out.split(separator: "\n").map(String.init).first { $0.hasPrefix("FAIL:") }
+            var allOk = failure == nil
+            var duplicated = false
             var matchedKeys = Set<String>()
             let keyMap: [String: String] = [
                 "代理内核": "代理内核", "TUN网卡": "TUN 网卡", "出口IP": "出口 IP",
@@ -484,14 +527,14 @@ final class VM: ObservableObject {
                 "客户端语言": "客户端语言", "ASN属性": "ASN 属性", "生态可达性": "服务响应",
             ]
             for line in out.split(separator: "\n") {
-                let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+                let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
                 guard parts.count == 2 else { continue }
                 let rhs = parts[1]
-                let status = rhs.split(separator: ":", maxSplits: 1).map(String.init)
+                let status = rhs.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
                 guard let code = status.first else { continue }
                 let detail = status.count > 1 ? status[1] : ""
                 guard let rowName = keyMap[parts[0]], let idx = self.rows.firstIndex(where: { $0.name == rowName }) else { continue }
-                matchedKeys.insert(parts[0])
+                guard matchedKeys.insert(parts[0]).inserted else { duplicated = true; allOk = false; continue }
                 switch code {
                 case "ok": self.rows[idx].state = .ok
                 case "info": self.rows[idx].state = .info
@@ -500,19 +543,22 @@ final class VM: ObservableObject {
                 }
                 self.rows[idx].detail = detail
             }
-            self.run(["status"]) { st in
-                self.applyAccountStatus(st)
+            if let failure = failure { self.banner = String(failure.dropFirst(5)) }
+            else if duplicated { self.banner = "本次扫描包含重复检查项，请重新扫描。" }
+            self.run(["status"], requireSuccess: true) { st in
+                let statusOK = self.applyAccountStatus(st)
                 self.isScanning = false
                 self.lastScanAt = Date()
+                if !statusOK && self.banner.isEmpty { self.banner = "无法读取有效的账号档案状态，请重新扫描。" }
                 if matchedKeys.count < self.rows.count {
                     for index in self.rows.indices where self.rows[index].state == .pending {
                         self.rows[index].state = .fail
-                        self.rows[index].detail = "本次未取得结果,请重新扫描"
+                        self.rows[index].detail = failure.map { String($0.dropFirst(5)) } ?? "本次未取得结果,请重新扫描"
                     }
-                    self.banner = "本次扫描输出不完整(\(matchedKeys.count)/\(self.rows.count))，请重新扫描"
+                    if self.banner.isEmpty { self.banner = "本次扫描输出不完整(\(matchedKeys.count)/\(self.rows.count))，请重新扫描" }
                     self.phase = .failed
                 } else {
-                    self.phase = allOk ? .ready : .failed
+                    self.phase = allOk && statusOK ? .ready : .failed
                 }
             }
         }
@@ -541,7 +587,7 @@ final class VM: ObservableObject {
             let failure = lines.first { $0.hasPrefix("FAIL:") }
             if failure != nil || success == nil {
                 self.banner = failure.map { String($0.dropFirst(5)) } ?? "未取得打开成功确认，请重新扫描后重试。"
-                self.run(["status"]) { status in
+                self.run(["status"], requireSuccess: true) { status in
                     self.applyAccountStatus(status)
                     self.phase = .openFailed
                 }
