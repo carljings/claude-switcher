@@ -32,16 +32,27 @@ class EnvironmentCheckTests(unittest.TestCase):
         (self.base / 'stun-probe.py').write_text("import os\nprint(os.environ.get('FAKE_STUN', 'RESULT:192.0.2.20'))\n")
         (self.base / 'network-audit.py').write_text("print('route\\tinfo\\t隔离测试的已核验探测连接')\n")
         self.fake('curl', r'''
-headers=""; next_header=0
+headers=""; next_header=0; fail_http=0; write_status=0
 for value do
  if [ "$next_header" = 1 ]; then headers="$value"; next_header=0; fi
  [ "$value" = '-D' ] && next_header=1
+ [ "$value" = '-f' ] && fail_http=1
+ [ "$value" = '-w' ] && write_status=1
  last=$value
 done
 [ -n "$headers" ] && printf '%s\n' "${FAKE_WEB_HEADER:-}" > "$headers"
+printf '%s\n' "$last" >> "$FAKE_CURL_LOG"
 case "$last" in
- *cdn-cgi/trace) printf 'ip=%s\nloc=%s\n' "${FAKE_IP:-192.0.2.20}" "${FAKE_COUNTRY:-US}";;
- *ipinfo.io/json) printf '{"org":"%s"}\n' "${FAKE_ORG-AS174 Cogent Communications, LLC}";;
+ *cdn-cgi/trace) printf 'ip=%s\nloc=%s\n' "${FAKE_IP-192.0.2.20}" "${FAKE_COUNTRY:-US}";;
+ *ipinfo.io/*json)
+  if [ "${FAKE_ASN_JSON+x}" = x ]; then
+   printf '%s' "$FAKE_ASN_JSON"
+  else
+   printf '{\n "ip":"%s",\n "org":"%s"\n}\n' "${FAKE_ASN_IP-192.0.2.20}" "${FAKE_ORG-AS174 Cogent Communications, LLC}"
+  fi
+  [ "$write_status" = 1 ] && printf '\n%s' "${FAKE_ASN_STATUS:-200}"
+  if [ "$fail_http" = 1 ] && [ "${FAKE_ASN_STATUS:-200}" -ge 400 ]; then exit 22; fi
+  exit "${FAKE_ASN_EXIT:-0}";;
  *api.anthropic.com*) printf '%s' "${FAKE_API_STATUS:-401}"; exit "${FAKE_HTTP_EXIT:-0}";;
  *claude.ai*) printf '%s' "${FAKE_WEB_STATUS:-200}"; exit "${FAKE_HTTP_EXIT:-0}";;
  *) exit 90;;
@@ -57,7 +68,9 @@ esac
         self.fake('sleep', 'exit 0\n')
         for name in ['open', 'osascript', 'sudo', 'pkill', 'killall']:
             self.fake(name, 'echo called >> ' + shlex.quote(str(self.folder / 'unexpected-action')) + '\nexit 99\n')
-        self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin) + os.pathsep + os.defpath)
+        self.curl_log = self.folder / 'curl-urls'
+        self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin) + os.pathsep + os.defpath,
+                        FAKE_CURL_LOG=str(self.curl_log))
 
     def fake(self, name, body):
         path = self.bin / name
@@ -127,6 +140,59 @@ esac
 
     def test_empty_org_remains_unknown(self):
         self.assertEqual(self.row('ASN属性', FAKE_ORG=''), 'warn:未获取ASN归属')
+
+    def test_asn_lookup_explicitly_queries_the_cloudflare_ip(self):
+        row = self.row('ASN属性', FAKE_IP='198.51.100.7', FAKE_ASN_IP='198.51.100.7',
+                       FAKE_ORG='AS7922 Comcast Cable Communications, LLC')
+        self.assertTrue(row.startswith('ok:'), row)
+        self.assertIn('仅名称匹配', row)
+        urls = [url for url in self.curl_log.read_text().splitlines() if 'ipinfo.io/' in url]
+        self.assertEqual(urls, ['https://ipinfo.io/198.51.100.7/json'])
+
+    def test_asn_response_must_identify_the_exact_target_ip(self):
+        for response_ip in ['198.51.100.8', '192.0.2.020', None, 3221226004]:
+            with self.subTest(response_ip=response_ip):
+                body = json.dumps({'ip': response_ip, 'org': 'AS7922 Comcast Cable'}, indent=2)
+                self.assertEqual(self.row('ASN属性', FAKE_ASN_JSON=body), 'warn:未获取ASN归属')
+
+    def test_invalid_asn_target_never_sends_an_asn_request(self):
+        for target in ['', 'invalid', '192.0.2.020', '256.0.2.20', '::1', '192.0.2.20/24',
+                       '192.0.2.20?query=1', ' 192.0.2.20']:
+            with self.subTest(target=target):
+                self.curl_log.write_text('')
+                self.assertEqual(self.row('ASN属性', FAKE_IP=target), 'warn:未获取ASN归属')
+                self.assertNotIn('ipinfo.io/', self.curl_log.read_text())
+
+    def test_malformed_asn_response_remains_unknown(self):
+        for body in ['{"org":"AS7922 Comcast Cable",', '[]', 'null',
+                     json.dumps({'ip': '192.0.2.20'}),
+                     json.dumps({'org': 'AS7922 Comcast Cable'})]:
+            with self.subTest(body=body):
+                self.assertEqual(self.row('ASN属性', FAKE_ASN_JSON=body), 'warn:未获取ASN归属')
+
+    def test_failed_asn_transport_or_http_response_cannot_supply_an_org(self):
+        for values in [dict(FAKE_ASN_EXIT='28'), dict(FAKE_ASN_STATUS='302'),
+                       dict(FAKE_ASN_STATUS='429'), dict(FAKE_ASN_STATUS='503')]:
+            with self.subTest(values=values):
+                self.assertEqual(self.row('ASN属性', FAKE_ORG='AS7922 Comcast Cable', **values),
+                                 'warn:未获取ASN归属')
+
+    def test_asn_org_must_be_a_bounded_printable_nonempty_string(self):
+        for org in [None, 123, ['Comcast'], '', '   ', 'AS7922 Comcast\nCable',
+                    'AS7922 Comcast\rCable', 'AS7922 Comcast\tCable', 'AS7922 Comcast\x1b[0m',
+                    'AS7922 Comcast\x7f', 'x' * 301]:
+            with self.subTest(org=org):
+                body = json.dumps({'ip': '192.0.2.20', 'org': org})
+                self.assertEqual(self.row('ASN属性', FAKE_ASN_JSON=body), 'warn:未获取ASN归属')
+
+    def test_asn_history_remains_information_when_live_attribution_is_unknown(self):
+        self.reviewed()
+        row = self.row('ASN属性', FAKE_ASN_IP='198.51.100.8', FAKE_ORG='AS7922 Comcast Cable')
+        self.assertTrue(row.startswith('info:'), row)
+        self.assertIn('截图', row)
+        self.assertIn('未验证物理接入', row)
+        self.assertIn('实时归属未知', row)
+        self.assertNotIn('Comcast', row)
 
     def test_stun_silence_without_policy_blocks_in_strict_mode(self):
         row = self.row('WebRTC', FAKE_STUN='RESULT:NONE')

@@ -669,7 +669,33 @@ checkdetail() {
         echo "规则置顶=$ROUTE_STATE:$ROUTE_DETAIL"
     fi
     # 13. 这里只查询ASN归属名称,不等同于单个IP的hosting/住宅用途分类。
-    org=$(curl -s --max-time 6 https://ipinfo.io/json 2>/dev/null | grep '"org"' | cut -d'"' -f4)
+    org=$(python3 - "$ip" <<'PY_ASN_ORG'
+import ipaddress
+import json
+import subprocess
+import sys
+
+try:
+    ip = sys.argv[1]
+    if str(ipaddress.IPv4Address(ip)) != ip:
+        raise ValueError('non-canonical IPv4')
+    raw = subprocess.check_output(
+        ['curl', '-q', '-f', '-s', '--max-time', '6', '-w', '\n%{http_code}',
+         'https://ipinfo.io/' + ip + '/json'],
+        stderr=subprocess.DEVNULL, timeout=8)
+    body, status = raw.rsplit(b'\n', 1)
+    if status != b'200':
+        raise ValueError('unexpected HTTP status')
+    data = json.loads(body)
+    if not isinstance(data, dict) or data.get('ip') != ip:
+        raise ValueError('unexpected IP')
+    org = data.get('org')
+    if isinstance(org, str) and 0 < len(org) <= 300 and org.strip() and org.isprintable():
+        print(org)
+except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+    pass
+PY_ASN_ORG
+)
     if [ -n "$ASN_REVIEW" ]; then
         echo "ASN属性=info:$ASN_REVIEW;实时归属${org:-未知}"
     else
